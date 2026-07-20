@@ -81,31 +81,11 @@ class Neo4jSettings(BaseSettings):
     NEO4J_PASSWORD: SecretStr = SecretStr("changeme")
 
 
-# ── Redis (Cache + Session) ─────────────────────────────────
-class RedisCacheSettings(BaseSettings):
-    REDIS_CACHE_HOST: str = "localhost"
-    REDIS_CACHE_PORT: int = 6379
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def REDIS_CACHE_URL(self) -> str:
-        return f"redis://{self.REDIS_CACHE_HOST}:{self.REDIS_CACHE_PORT}"
-
-
-# ── Redis Rate Limiter ──────────────────────────────────────
-class RedisRateLimiterSettings(BaseSettings):
-    REDIS_RATE_LIMIT_HOST: str = "localhost"
-    REDIS_RATE_LIMIT_PORT: int = 6379
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def REDIS_RATE_LIMIT_URL(self) -> str:
-        return f"redis://{self.REDIS_RATE_LIMIT_HOST}:{self.REDIS_RATE_LIMIT_PORT}"
-
-
-class DefaultRateLimitSettings(BaseSettings):
-    DEFAULT_RATE_LIMIT_LIMIT: int = 10
-    DEFAULT_RATE_LIMIT_PERIOD: int = 3600
+# NOTE: Redis and rate-limit settings previously lived here. Nothing read them —
+# no Redis client is installed and the rate limiter was a `pass` stub. They are
+# removed rather than kept as configuration that implies capability the service
+# does not have. Real rate limiting is Phase 6 of docs/ADVANCED_RAG_PLAN.md and
+# should reintroduce only the settings it actually consumes.
 
 
 # ── CORS ────────────────────────────────────────────────────
@@ -115,12 +95,8 @@ class CORSSettings(BaseSettings):
     CORS_HEADERS: list[str] = ["*"]
 
 
-# ── First Admin User (Seeding) ──────────────────────────────
-class FirstUserSettings(BaseSettings):
-    ADMIN_NAME: str = "admin"
-    ADMIN_EMAIL: str = "admin@admin.com"
-    ADMIN_USERNAME: str = "admin"
-    ADMIN_PASSWORD: str = "!Ch4ng3Th1sP4ssW0rd!"
+# NOTE: FirstUserSettings (ADMIN_*) is removed — there is no seeding routine and
+# no admin endpoint. It shipped a default admin password that nothing consumed.
 
 
 # ── AI Services ─────────────────────────────────────────────
@@ -164,10 +140,8 @@ class ObservabilitySettings(BaseSettings):
     LANGSMITH_PROJECT: str = "contextflow_dev"
 
 
-# ── Logging ─────────────────────────────────────────────────
-class LoggerSettings(BaseSettings):
-    LOG_LEVEL: str = "INFO"
-    LOG_FORMAT_JSON: bool = False
+# NOTE: LoggerSettings (LOG_LEVEL, LOG_FORMAT_JSON) is removed — logging was
+# never configured from it. Reintroduce alongside an actual dictConfig (Phase 6).
 
 
 # ── Composed Settings ───────────────────────────────────────
@@ -177,16 +151,11 @@ class Settings(
     CryptSettings,
     PostgresSettings,
     Neo4jSettings,
-    RedisCacheSettings,
-    RedisRateLimiterSettings,
-    DefaultRateLimitSettings,
     CORSSettings,
-    FirstUserSettings,
     AISettings,
     LiveKitSettings,
     RAGServiceSettings,
     ObservabilitySettings,
-    LoggerSettings,
 ):
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", ".env"),

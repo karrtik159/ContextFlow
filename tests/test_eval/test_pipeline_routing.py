@@ -10,24 +10,14 @@ This approach tests the LOGIC of the pipeline, not the HTTP transport.
 
 import pytest
 
-from app.services.cache_sanitizer import SanitizedQuery, sanitize_query
-
-# ── Helpers ──────────────────────────────────────────────────
-
-def _build_sanitized(query: str, requires_isolation: bool = False, pii: list | None = None):
-    return SanitizedQuery(
-        original_query=query,
-        normalized_query=query.lower().strip(),
-        requires_isolation=requires_isolation,
-        detected_pii_types=pii or [],
-    )
+from app.services.query_normalizer import normalize_for_cache_key
 
 
 async def _simulate_pipeline(
     query: str,
     user_id: str | None = None,
     *,
-    sanitized: SanitizedQuery | None = None,
+    cache_key: str | None = None,
     embedding: list[float] | None = None,
     cached_answer: str | None = None,
     intent_needs_rag: bool = False,
@@ -39,9 +29,9 @@ async def _simulate_pipeline(
 
     Returns a dict with 'answer' and 'routed_to' mirroring RAGQueryResponse.
     """
-    # Step 0: Sanitize
-    if sanitized is None:
-        sanitized = sanitize_query(query)
+    # Step 0: Cache-key normalization
+    if cache_key is None:
+        cache_key = normalize_for_cache_key(query)
 
     # Step 1: Intent
     needs_rag = intent_needs_rag
@@ -156,13 +146,17 @@ async def test_pii_query_uses_user_scoped_cache():
 
 @pytest.mark.asyncio
 async def test_no_pii_still_uses_user_scoped_cache():
-    """Clean queries use the resolved user's cache scope, not a global pool."""
-    sanitized = sanitize_query("What is machine learning?")
+    """Clean queries use the resolved user's cache scope, not a global pool.
+
+    There is no unscoped cache tier: scope comes from the resolved user id, not
+    from any property of the query itself.
+    """
+    cache_key = normalize_for_cache_key("What is machine learning?")
 
     user_id = "user-456"
     cache_lookup_scoped_id = user_id
 
-    assert sanitized.requires_isolation is False
+    assert cache_key == "what is machine learning?"
     assert cache_lookup_scoped_id == "user-456"
 
 
@@ -183,16 +177,11 @@ async def test_embedding_failure_skips_cache():
 
 # ── Test: Sanitizer Integration ─────────────────────────────
 
-def test_sanitizer_flags_pii_for_isolation():
-    """End-to-end: PII query triggers isolation flag."""
-    result = sanitize_query("Email me at admin@company.org")
-    assert result.requires_isolation is True
-    assert "EMAIL" in result.detected_pii_types
-    assert "[email]" in result.normalized_query
+def test_cache_key_masks_pii():
+    """PII is masked out of the key that gets persisted on the cache node."""
+    assert normalize_for_cache_key("Email me at admin@company.org") == "email me at [email]"
 
 
-def test_sanitizer_cleans_fillers():
-    """End-to-end: filler words are stripped for better cache hits."""
-    result = sanitize_query("Hey, can you tell me about transformers?")
-    assert result.normalized_query == "about transformers?"
-    assert result.requires_isolation is False
+def test_cache_key_strips_fillers():
+    """Filler prefixes are stripped so phrasings share a cache entry."""
+    assert normalize_for_cache_key("Hey, can you tell me about transformers?") == "about transformers?"

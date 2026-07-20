@@ -4,10 +4,9 @@ User CRUD endpoints.
 Adapted to match benavlabs/FastAPI-boilerplate for standard User ops.
 """
 
-from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException, status
 
 from app.api.deps import CurrentUser, DBSession
 from app.core.security import hash_password

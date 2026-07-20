@@ -31,13 +31,10 @@ dependencies = [
     "mem0ai>=1.0.5",
     # --- Graph Database ---
     "neo4j>=5.20.0",
-    # --- Cache / Session ---
-    "redis[hiredis]>=5.0.0",
     # --- LiveKit (token generation only — no otel conflict) ---
     "livekit>=0.17.0",
     "livekit-api>=1.0.0",
     # --- Observability (let crewai pin its own otel version) ---
-    "loguru>=0.7.0",
     "psycopg2-binary>=2.9.11",
     "langsmith>=0.7.14",
     "openinference-instrumentation-crewai>=1.0.0",

@@ -9,7 +9,6 @@ These tests verify:
   - Recovery after a closed loop
 """
 
-import asyncio
 import threading
 
 import pytest

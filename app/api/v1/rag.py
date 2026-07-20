@@ -15,7 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.api.deps import DBSession, OptionalUser, is_valid_rag_service_request, resolve_rag_user_id
+from app.api.deps import OptionalUser, is_valid_rag_service_request, resolve_rag_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -76,14 +76,16 @@ async def rag_query(
     request: RAGQueryRequest,
     background_tasks: BackgroundTasks,
     http_request: Request,
-    db: DBSession,
     user: OptionalUser = None,
 ):
     """
     Smart-routed query endpoint:
 
-    0. **Sanitize & Pre-Filter** — Scrubs PII and simplifies structural mapping natively using regex.
-    1. **Neo4j Semantic Cache** — Bypasses all processing securely grabbing sub-sec cache globally or natively isolated.
+    0. **Cache-Key Normalization** — Whitespace/case folding plus regex PII
+       masking, producing the key used against the semantic cache. Not a
+       privacy control: the raw query still reaches the LLM and the crew.
+    1. **Neo4j Semantic Cache** — A per-user cache; a hit bypasses all
+       downstream processing. There is no global/shared cache scope.
     2. **Intent Classification** — A fast LLM call (~200ms) determines if the
        query needs knowledge retrieval or is simple conversation.
     3. **Direct Chat Path** — Greetings, small talk, and opinions bypass
@@ -92,9 +94,9 @@ async def rag_query(
        SupportCrew (pgvector + Neo4j + Mem0) pipeline.
     5. **Memory** — Both paths optionally trigger background MemoryCrew and populate graphs.
     """
-    from app.services.cache_sanitizer import sanitize_query
     from app.services.embeddings import embed_text_async_safe
     from app.services.llm_provider import classify_intent, direct_chat, stream_direct_chat
+    from app.services.query_normalizer import normalize_for_cache_key
     from app.services.semantic_cache import get_cached_response, populate_semantic_cache
 
     resolved_user_id = resolve_rag_user_id(
@@ -116,8 +118,10 @@ async def rag_query(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # ── Step 0: Sanitize Inbound Query ──────────────────────
-    sanitized = sanitize_query(request.query)
+    # ── Step 0: Build the semantic-cache key ────────────────
+    # Cache-key normalization only. The raw query is what reaches the
+    # classifier, the LLM, and the crew below — this is not a privacy boundary.
+    cache_key_query = normalize_for_cache_key(request.query)
 
     # ── Step 1: Intent Classification ──────────────────────
     needs_rag = await classify_intent(request.query)
@@ -125,10 +129,10 @@ async def rag_query(
     # ── Step 2: User-Scoped Semantic Cache ─────────────────
     query_embedding = None
     if needs_rag and resolved_user_id:
-        query_embedding = await embed_text_async_safe(sanitized.normalized_query)
+        query_embedding = await embed_text_async_safe(cache_key_query)
         if query_embedding:
             cached_answer = await get_cached_response(
-                normalized_query=sanitized.normalized_query,
+                normalized_query=cache_key_query,
                 embedding=query_embedding,
                 user_id=resolved_user_id,
             )
@@ -158,7 +162,7 @@ async def rag_query(
         if populate_cache and resolved_user_id and query_embedding:
             background_tasks.add_task(
                 populate_semantic_cache,
-                normalized_query=sanitized.normalized_query,
+                normalized_query=cache_key_query,
                 embedding=query_embedding,
                 answer=answer,
                 user_id=resolved_user_id,

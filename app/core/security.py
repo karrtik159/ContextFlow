@@ -122,11 +122,6 @@ def _decode_jwt(token: str) -> dict | None:
         return None
 
 
-def decode_access_token(token: str) -> dict | None:
-    """Raw JWT decode — no blacklist check. Used by deps.py backwards compat."""
-    return _decode_jwt(token)
-
-
 async def verify_token(
     token: str,
     expected_token_type: TokenType,

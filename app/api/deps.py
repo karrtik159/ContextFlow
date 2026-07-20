@@ -5,7 +5,6 @@ All dependencies are designed as reusable `Annotated` type aliases:
     DBSession       → async database session (auto commit/rollback)
     CurrentUser     → authenticated user dict (requires valid JWT)
     OptionalUser    → user dict or None (no auth required)
-    CurrentSuperUser → authenticated admin (requires is_superuser=True)
 """
 
 import hmac
@@ -138,39 +137,3 @@ def resolve_rag_user_id(
             detail="user_id requires authentication or internal service token",
         )
     return None
-
-
-# ── Superuser Gate ───────────────────────────────────────────────────
-async def get_current_superuser(
-    current_user: CurrentUser,
-) -> dict[str, Any]:
-    """
-    Requires the authenticated user to have is_superuser=True.
-    Raises 403 Forbidden otherwise.
-    """
-    if not current_user.get("is_superuser"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Insufficient privileges",
-        )
-    return current_user
-
-
-CurrentSuperUser = Annotated[dict[str, Any], Depends(get_current_superuser)]
-
-
-# ── Rate Limiter (basic in-memory, upgrade to Redis later) ───────────
-async def rate_limiter_dependency(
-    request: Request,
-    db: DBSession,
-    user: OptionalUser = None,
-) -> None:
-    """
-    Placeholder rate limiter dependency.
-
-    TODO: Implement with Redis-backed sliding window counter.
-    Config: settings.DEFAULT_RATE_LIMIT_LIMIT / settings.DEFAULT_RATE_LIMIT_PERIOD
-    """
-    # Will be implemented when Redis rate limiting module is built.
-    # For now, all requests pass through.
-    pass

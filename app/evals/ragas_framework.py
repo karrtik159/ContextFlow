@@ -47,7 +47,6 @@ class EvalCase(BaseModel):
     reference: str | None = None
     retrieved_contexts: list[str] | None = None
     reference_contexts: list[str] | None = None
-    metadata: dict[str, Any] | None = None
 
     def to_ragas_record(self) -> dict[str, Any]:
         record: dict[str, Any] = {
@@ -78,10 +77,20 @@ class FastAPIRagTarget:
         return answer
 
     def _request_json(self, method: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        # /rag/query has no unscoped mode: anonymous callers get 401, and an
+        # anonymous caller supplying a user_id gets 403. The eval harness drives
+        # arbitrary per-case user_ids, so it authenticates as an internal
+        # service — the one caller class permitted to name its own scope.
+        token = settings.RAG_SERVICE_TOKEN.get_secret_value()
+        if not token:
+            raise RuntimeError(
+                "RAG_SERVICE_TOKEN is not configured. The eval target authenticates as an "
+                "internal service; without it every case fails with 401."
+            )
         with httpx.Client(base_url=self.api_base_url, timeout=self.timeout_seconds) as client:
-            response = client.request(method, path, json=payload)
+            response = client.request(method, path, json=payload, headers={"X-RAG-Service-Token": token})
             response.raise_for_status()
-            return {"data": response.json(), "status_code": response.status_code}
+            return {"data": response.json()}
 
 
 def load_eval_cases(path: str | Path) -> list[EvalCase]:

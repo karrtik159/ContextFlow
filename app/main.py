@@ -5,9 +5,6 @@ Uses `create_application` initialized with modular settings
 and a fully configured lifespan from `app.core.setup.py`.
 """
 
-from fastapi import FastAPI
-from loguru import logger
-
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.setup import create_application

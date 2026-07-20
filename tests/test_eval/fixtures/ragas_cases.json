@@ -42,9 +42,9 @@
   {
     "user_input": "How does the CrewAI SupportCrew process a knowledge query?",
     "user_id": "eval-user",
-    "reference": "The SupportCrew runs two agents sequentially: a Context Gatherer that searches pgvector, Neo4j, and user memories in parallel, followed by an Answer Synthesizer that generates a personalized response from the retrieved context.",
+    "reference": "The SupportCrew runs two agents sequentially: a Context Gatherer that searches pgvector, Neo4j, and user memories, followed by an Answer Synthesizer that generates a personalized response from the retrieved context. The synthesizer holds no tools and receives context only through its task dependency on the retrieval task.",
     "reference_contexts": [
-      "SupportCrew uses context_gatherer with VectorSearchTool, GraphSearchTool, MemorySearchTool, followed by answer_synthesizer with MemorySearchTool. Process is sequential."
+      "SupportCrew uses context_gatherer with VectorSearchTool, GraphSearchTool, and MemorySearchTool, followed by answer_synthesizer, which deliberately has no tools because it reads attacker-influenceable retrieved content. Process is sequential."
     ]
   },
   {
