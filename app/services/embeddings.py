@@ -88,6 +88,70 @@ def init_local_embedding_model() -> None:
         logger.error("Failed to load local embedding model: %s", exc, exc_info=True)
 
 
+# ── Token Counting ──────────────────────────────────────────
+#
+# Lives here, not in chunking.py, because the token budget is a property of the
+# configured embedding model — the same coupling that makes EMBEDDING_DIMENSIONS
+# load-bearing. chunking.py takes a counter as an argument so it stays pure.
+
+_tiktoken_encoding = None
+_tiktoken_lock = threading.Lock()
+
+# [CLS] and [SEP] are added by the HF tokenizer and consume real budget, but
+# `add_special_tokens=False` is needed to count the content itself.
+_HF_SPECIAL_TOKEN_ALLOWANCE = 2
+
+
+def _get_tiktoken_encoding():
+    """Thread-safe lazy tiktoken encoding for the configured model."""
+    global _tiktoken_encoding
+    if _tiktoken_encoding is not None:
+        return _tiktoken_encoding
+
+    with _tiktoken_lock:
+        if _tiktoken_encoding is not None:
+            return _tiktoken_encoding
+
+        import tiktoken
+
+        try:
+            _tiktoken_encoding = tiktoken.encoding_for_model(settings.EMBEDDING_MODEL)
+        except KeyError:
+            # Non-OpenAI models (google, openrouter, local gateways) are not in
+            # tiktoken's registry. cl100k_base is an approximation — it is the
+            # right encoding for the OpenAI embedding models and a reasonable
+            # proxy elsewhere. Counts may be off for a genuinely different
+            # tokenizer, which is why chunk budgets sit well under the ceiling.
+            logger.warning(
+                "No tiktoken encoding registered for '%s'; falling back to cl100k_base. "
+                "Token counts are approximate for this model.",
+                settings.EMBEDDING_MODEL,
+            )
+            _tiktoken_encoding = tiktoken.get_encoding("cl100k_base")
+    return _tiktoken_encoding
+
+
+def count_tokens(text: str) -> int:
+    """Token count under the CONFIGURED embedding model's tokenizer.
+
+    Pass this into `chunk_document` — using a different tokenizer for chunking
+    than for embedding reintroduces the silent-truncation bug that the token
+    budget exists to prevent.
+    """
+    if not text:
+        return 0
+
+    if settings.EMBEDDING_PROVIDER == "huggingface":
+        tokenizer = _get_hf_encoder().tokenizer
+        # truncation=False is load-bearing. Without it the tokenizer returns at
+        # most model_max_length ids, so this would measure the cap (256) instead
+        # of the text and every over-budget check would silently pass.
+        ids = tokenizer(text, add_special_tokens=False, truncation=False)["input_ids"]
+        return len(ids) + _HF_SPECIAL_TOKEN_ALLOWANCE
+
+    return len(_get_tiktoken_encoding().encode(text))
+
+
 # ── Embedding Client Factory ────────────────────────────────
 
 
@@ -143,8 +207,11 @@ def _validate_embedding_dimensions(vector: list[float]) -> list[float]:
 # ── Embedding API kwargs ────────────────────────────────────
 
 
-def _build_embedding_kwargs(text: str) -> dict:
-    """Build the kwargs dict for an OpenAI embeddings.create() call."""
+def _build_embedding_kwargs(text: str | list[str]) -> dict:
+    """Build the kwargs dict for an OpenAI embeddings.create() call.
+
+    `input` accepts a single string or a batch of them.
+    """
     kwargs = {
         "model": settings.EMBEDDING_MODEL,
         "input": text,
@@ -194,6 +261,81 @@ async def embed_text_async(text: str) -> list[float]:
     client = _get_async_openai_embedding_client()
     response = await client.embeddings.create(**_build_embedding_kwargs(text))
     return _validate_embedding_dimensions(response.data[0].embedding)
+
+
+# ── Batch Embedding ─────────────────────────────────────────
+#
+# Document ingestion produces tens to thousands of chunks at once. Calling
+# embed_text() per chunk means one HTTP round-trip each, which dominates ingest
+# latency and needlessly multiplies rate-limit pressure.
+
+# OpenAI accepts up to 2048 inputs per embeddings request. 128 is deliberately
+# well under that: a batch also has an aggregate token ceiling, and smaller
+# batches fail smaller when one is rejected.
+_EMBED_BATCH_SIZE = 128
+
+
+def _order_batch_response(response, expected: int) -> list[list[float]]:
+    """Return embeddings in input order.
+
+    The API returns an `index` on each item; relying on positional order would
+    silently mis-pair vectors with chunks if that ever changed. A mis-paired
+    corpus is close to undetectable downstream, so this sorts explicitly.
+    """
+    items = sorted(response.data, key=lambda d: d.index)
+    if len(items) != expected:
+        raise ValueError(
+            f"Embedding batch returned {len(items)} vectors for {expected} inputs."
+        )
+    return [_validate_embedding_dimensions(item.embedding) for item in items]
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Synchronous batch embedding — for CrewAI tools and worker threads.
+
+    Returns vectors in the same order as `texts`.
+    """
+    if not texts:
+        return []
+
+    if settings.EMBEDDING_PROVIDER == "huggingface":
+        encoder = _get_hf_encoder()
+        vectors = encoder.encode(
+            texts,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            batch_size=32,
+        )
+        return [_validate_embedding_dimensions(v.tolist()) for v in vectors]
+
+    client = _get_openai_embedding_client()
+    out: list[list[float]] = []
+    for i in range(0, len(texts), _EMBED_BATCH_SIZE):
+        batch = texts[i : i + _EMBED_BATCH_SIZE]
+        response = client.embeddings.create(**_build_embedding_kwargs(batch))
+        out.extend(_order_batch_response(response, len(batch)))
+    return out
+
+
+async def embed_texts_async(texts: list[str]) -> list[list[float]]:
+    """Async batch embedding — for FastAPI endpoints.
+
+    Returns vectors in the same order as `texts`.
+    """
+    if not texts:
+        return []
+
+    if settings.EMBEDDING_PROVIDER == "huggingface":
+        return await asyncio.to_thread(embed_texts, texts)
+
+    client = _get_async_openai_embedding_client()
+    out: list[list[float]] = []
+    for i in range(0, len(texts), _EMBED_BATCH_SIZE):
+        batch = texts[i : i + _EMBED_BATCH_SIZE]
+        response = await client.embeddings.create(**_build_embedding_kwargs(batch))
+        out.extend(_order_batch_response(response, len(batch)))
+    return out
 
 
 async def embed_text_async_safe(text: str) -> list[float] | None:

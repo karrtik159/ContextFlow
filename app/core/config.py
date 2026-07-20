@@ -118,6 +118,28 @@ class AISettings(BaseSettings):
     EMBEDDING_DIMENSIONS: int = 1536
     HUGGINGFACE_API_KEY: SecretStr = SecretStr("")
 
+    # Hard input ceiling of the embedding model, in tokens. Coupled to
+    # EMBEDDING_MODEL exactly as EMBEDDING_DIMENSIONS is — switching provider
+    # requires updating both. Chunk sizes derive from this; ingestion refuses to
+    # store a chunk that exceeds it rather than letting the encoder truncate.
+    #
+    #   openai/text-embedding-3-*    → 8192, per the installed openai package
+    #     ("8192 tokens for all embedding models",
+    #      openai/resources/embeddings.py). Verified in-package, not from memory.
+    #   huggingface/all-MiniLM-L6-v2 → 256 word-pieces, INCLUDING [CLS]/[SEP].
+    #     Measured: max_seq_length == 256, and SentenceTransformer.encode()
+    #     truncates past it with no warning, no error, and no exception — a
+    #     3000-word input embeds identically to its first 200 words
+    #     (cosine 1.0000001). This is why ingestion asserts instead of trusting
+    #     the encoder to complain.
+    EMBEDDING_MAX_TOKENS: int = 8192
+
+    # Target size and overlap for document chunks, in tokens. Kept well under
+    # EMBEDDING_MAX_TOKENS: retrieval quality degrades long before the encoder's
+    # hard limit, because one vector has to represent the whole chunk.
+    CHUNK_TARGET_TOKENS: int = 512
+    CHUNK_OVERLAP_TOKENS: int = 64
+
     @field_validator("LLM_PROVIDER", "EMBEDDING_PROVIDER", mode="before")
     @classmethod
     def _normalize_provider(cls, v: str) -> str:

@@ -210,6 +210,24 @@ class RetrievalTrace:
 Each phase is independently shippable and independently reviewable. Do not batch them.
 
 ### Phase 1 — Corpus foundation
+
+**Status: DONE.** Tests 130→189 passed / 2 skipped; ruff held at 76. Migration
+`f1a2b3c4d5e6` verified against a throwaway `pgvector/pgvector:pg16` container:
+upgrade, downgrade, and re-upgrade all clean, all three indexes created as
+specified. E2E ingest verified with the real tiktoken counter.
+
+Two corrections to this plan, both from empirical checks:
+- The OpenAI ceiling is **8192**, not 8191 (verified in the installed `openai`
+  package, not from memory). `EMBEDDING_MAX_TOKENS` is set accordingly.
+- **Token counts are not additive.** The first packing implementation summed
+  per-unit counts and blew the ceiling on CJK, where `count(a) + count(b)` is
+  far below `count(a + b)`. Packing now measures the assembled candidate chunk.
+  Any future retrieval code that budgets by summing has the same bug.
+
+MiniLM's silent truncation is CONFIRMED, and worse than the plan stated: a
+3000-word input embeds identically to its first 200 words (cosine 1.0000001)
+with no warning, because `SentenceTransformer.encode()` passes
+`truncation=True` internally and suppresses the tokenizer's own message.
 - `documents` + `chunks` models; Alembic migration (HNSW + GIN + composite indexes).
 - `app/services/chunking.py` — structure-first token-aware splitter. **Pure function, heavily unit-tested**: headings, code blocks, tables, CJK, a single 50k-token paragraph, empty input, token-budget boundaries.
 - `EMBEDDING_MAX_TOKENS` in config; assert on ingest.
