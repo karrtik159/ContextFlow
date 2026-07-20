@@ -1,0 +1,161 @@
+name: CI
+
+# Nothing ran automatically before this file existed: the repo had no .github
+# directory, so every check was whatever the author remembered to run locally.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The suite runs without external services, but the app module chain builds a
+  # SQLAlchemy engine at import, so a URL has to parse.
+  POSTGRES_SERVER: localhost
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: postgres
+  POSTGRES_DB: contextflow_ci
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev
+      - name: ruff check
+        # The repo carries a known lint debt. Fail on an INCREASE rather than
+        # on the existing count, so CI is useful from day one instead of being
+        # switched off until a cleanup lands.
+        run: |
+          uv run ruff check . --output-format=concise > ruff.txt 2>&1 || true
+          COUNT=$(grep -cE '^[^ ]+:[0-9]+:[0-9]+' ruff.txt || true)
+          echo "ruff findings: $COUNT (baseline: $RUFF_BASELINE)"
+          cat ruff.txt
+          if [ "$COUNT" -gt "$RUFF_BASELINE" ]; then
+            echo "::error::ruff findings increased from $RUFF_BASELINE to $COUNT"
+            exit 1
+          fi
+        env:
+          RUFF_BASELINE: "74"
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev
+      - name: pytest
+        run: uv run pytest -q
+
+  migrations:
+    # Applying the migration chain forward, back, and forward again catches the
+    # class of bug that only appears on a real database — a Postgres enum that
+    # outlives its table makes the second upgrade fail with "type already
+    # exists", which no unit test would see.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: contextflow_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev
+      - name: enable pgvector
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          PGPASSWORD=postgres psql -h localhost -U postgres -d contextflow_ci \
+            -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - name: single alembic head
+        run: |
+          HEADS=$(uv run alembic heads | grep -c '(head)')
+          echo "heads: $HEADS"
+          test "$HEADS" -eq 1 || { echo "::error::multiple alembic heads"; exit 1; }
+      - name: upgrade / downgrade / upgrade
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade -1
+          uv run alembic upgrade head
+
+  retrieval-eval:
+    # Retrieval metrics against the committed golden set, using a local
+    # sentence-transformer so the job needs no API key and costs nothing.
+    # 384 dims, so it gets its own database: the pgvector column width is built
+    # from EMBEDDING_DIMENSIONS at migration time.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: contextflow_eval
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_DB: contextflow_eval
+      EMBEDDING_PROVIDER: huggingface
+      EMBEDDING_MODEL: all-MiniLM-L6-v2
+      EMBEDDING_DIMENSIONS: "384"
+      EMBEDDING_MAX_TOKENS: "256"
+      CHUNK_TARGET_TOKENS: "192"
+      CHUNK_OVERLAP_TOKENS: "32"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev
+      - name: enable pgvector
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          PGPASSWORD=postgres psql -h localhost -U postgres -d contextflow_eval \
+            -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - run: uv run alembic upgrade head
+      - name: retrieval metrics
+        run: uv run python scripts/run_retrieval_eval.py --k 3 --json eval-results.json
+      - name: regression gate
+        # Thresholds are set below the current measured values, not at them, so
+        # normal run-to-run variation does not fail the build while a real
+        # regression still does. Raise them when the golden set grows.
+        run: |
+          uv run python - <<'PY'
+          import json, sys
+          r = json.load(open("eval-results.json"))["aggregate"]
+          floors = {"recall@3": 0.85, "ndcg@3": 0.85, "mrr": 0.85}
+          bad = {k: (r[k], f) for k, f in floors.items() if r[k] < f}
+          for k, (got, want) in bad.items():
+              print(f"::error::{k} = {got:.3f}, below floor {want}")
+          sys.exit(1 if bad else 0)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: retrieval-eval-results
+          path: eval-results.json

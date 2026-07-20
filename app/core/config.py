@@ -159,9 +159,31 @@ class RetrievalSettings(BaseSettings):
 
     # Cosine-similarity floor for the dense arms. Applied per-source, where the
     # score is calibrated — an RRF score is not, so it cannot carry a floor.
-    # Below this, a result is noise and is dropped even if nothing replaces it.
     # Retrieving nothing is a valid, honest outcome; the previous code had no
     # floor and labelled whatever came back "relevant".
+    #
+    # THIS VALUE IS PROVIDER-SPECIFIC AND ONLY PARTLY CALIBRATED.
+    # Measured on the committed golden set (scripts/run_retrieval_eval.py
+    # --sweep-threshold) with all-MiniLM-L6-v2, k=3, 19 chunks:
+    #
+    #     floor   recall@3   abstains on unanswerable
+    #     0.00-0.35  1.000        0 / 2
+    #     0.40       0.969        1 / 2
+    #     0.50       0.844        2 / 2
+    #     0.60       0.562        2 / 2
+    #
+    # Two things follow. First, for MiniLM anything at or below 0.35 is inert —
+    # 0.25 does nothing at all, and an unanswerable query ("configure SAML SSO",
+    # absent from the corpus) still retrieved 3 chunks at 0.467. Second, NO
+    # floor achieves both full recall and full abstention: topically-near but
+    # unanswerable queries outscore some genuinely relevant chunks. A single
+    # cosine threshold cannot separate them, which is the measured case for
+    # Phase 3's cross-encoder reranker — it scores query-document relevance
+    # directly rather than embedding proximity.
+    #
+    # The default below is UNCALIBRATED for the production provider
+    # (text-embedding-3-small), whose similarity distribution differs from
+    # MiniLM's. Re-run the sweep against it before trusting this number.
     RETRIEVAL_MIN_SIMILARITY: float = 0.25
 
     # Reciprocal Rank Fusion constant (Cormack et al. 2009).

@@ -288,6 +288,37 @@ Deviations and findings:
 - **Exit criteria:** every non-cached answer carries resolvable citations.
 
 ### Phase 5 — Evaluation
+
+**Status: DONE** (run before Phase 3 deliberately, so the reranker is measured
+rather than assumed). Tests 225→269 passed / 1 skipped; ruff held at 74.
+Measured for real with `all-MiniLM-L6-v2` against pgvector — no API spend.
+
+**Measured, k=3, 19 chunks, 16 answerable queries, floor 0.25:**
+recall@3 1.000 · precision@3 0.375 · MRR 1.000 · nDCG@3 1.000 · misses 0.
+At k=1: recall 0.938, MRR 1.000 — the top hit is relevant for every query.
+
+**Finding 1 — the similarity floor is inert, and no single value fixes it.**
+`RETRIEVAL_MIN_SIMILARITY` was 0.25 by guesswork. Measured, anything ≤0.35 is a
+no-op for MiniLM: the unanswerable "configure SAML SSO" query still retrieved 3
+chunks at similarity 0.467. Abstention was **0/2** at the shipped default. The
+sweep shows 0.40 → 1/2 abstention at recall 0.969; 0.50 → 2/2 at recall 0.844.
+There is no floor that achieves both. Topically-near-but-unanswerable queries
+outscore genuinely relevant chunks, so a cosine threshold cannot separate them.
+**This is the measured case for Phase 3's cross-encoder reranker**, which scores
+query-document relevance directly rather than embedding proximity. The default
+is left at 0.25 and annotated: it remains uncalibrated for
+`text-embedding-3-small`, whose distribution differs.
+
+**Finding 2 — the golden set validates retrieval but cannot compare
+strategies.** MRR 1.000 at every k on a 19-chunk corpus means the set is too
+small and too easy to discriminate. It will catch a regression; it will *not*
+show that a reranker helps. Phase 3 needs a larger, harder corpus with more
+near-miss distractors before its exit criterion ("measurable recall@k and nDCG
+improvement") can be met honestly.
+
+**Not verified:** the RAGAS generation half is wired (`--generation`) but never
+executed — it needs a running backend and a judge LLM. Faithfulness, answer
+relevance, and context precision/recall are unmeasured.
 - Fix `FastAPIRagTarget` auth and the stale fixture (Phase 0 if not already done).
 - **Retrieval** metrics from the trace: recall@k, MRR, nDCG — these are what Phases 1–3 are optimizing and are currently unmeasurable.
 - **Generation** metrics via RAGAS: faithfulness, answer relevance, context precision/recall.

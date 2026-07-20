@@ -1,0 +1,174 @@
+{
+  "_comment": [
+    "Labelled retrieval golden set for ContextFlow.",
+    "",
+    "The domain is DELIBERATELY FICTIONAL. If the corpus described real-world",
+    "software, a model could answer from prior knowledge and both retrieval and",
+    "faithfulness scores would be inflated by facts that never came from the",
+    "context. 'Meridian' exists only in this file, so an answer is either",
+    "grounded in retrieved context or invented.",
+    "",
+    "Relevance is labelled by (document, marker substring) rather than by chunk",
+    "id, because chunk ids are assigned at ingest and chunk boundaries move",
+    "whenever the chunker changes. A chunk counts as relevant when it belongs to",
+    "the named document AND contains the marker, case-insensitively. This keeps",
+    "the labels valid across Phase 3's chunking and reranking changes.",
+    "",
+    "Distractors are intentional: several documents mention overlapping terms",
+    "(retention, limits, tokens) so that a query has plausible-but-wrong",
+    "candidates to be confused by. A golden set with no distractors reports high",
+    "recall for any retriever."
+  ],
+  "documents": [
+    {
+      "key": "deployment",
+      "title": "Meridian Deployment Runbook",
+      "text": "# Meridian Deployment Runbook\n\n## Release Channels\n\nMeridian ships through three release channels. The canary channel receives every merged commit and serves two percent of production traffic. The stable channel receives promotions from canary after a soak period of six hours with no elevated error rate. The pinned channel never advances automatically and exists for customers on the Anchored support tier, who upgrade on a schedule they control.\n\nA release is identified by a Meridian release tag, which is the build date followed by a two-letter sequence code, for example 20260714-af. Release tags are immutable once published. Rebuilding the same commit produces a new tag rather than overwriting the old one, because the pinned channel may still be serving the previous artifact.\n\n## Rollback Procedure\n\nTo roll back a bad deploy, run the meridian rollback command with the previous release tag. The rollback command restores the previous container image, drains in-flight connections over a thirty second window, and then swaps the routing table. Rollback does not revert database migrations. If the bad release included a forward-incompatible migration, roll back the application first and then apply the inverse migration manually using the migration console.\n\nRollback is blocked automatically when the target release tag is older than fourteen days, because artifacts older than that are garbage collected from the registry. Rolling back to an evicted artifact fails with a registry miss. To roll back further than fourteen days, first restore the artifact from cold storage using the artifact restore command, which takes roughly eight minutes.\n\n## Health Checks\n\nThe readiness probe queries the primary database, the graph store, and the object cache. A failing readiness probe removes the instance from the load balancer rotation but does not terminate it, so that a wedged instance can still be inspected. The liveness probe checks only that the process is responsive, and a failing liveness probe restarts the container after three consecutive failures thirty seconds apart.\n\nDuring a deploy, readiness failures are expected while connections drain. The deploy controller therefore suppresses readiness alerts for the first ninety seconds after a routing table swap."
+    },
+    {
+      "key": "billing",
+      "title": "Meridian Billing Policy",
+      "text": "# Meridian Billing Policy\n\n## Plans\n\nMeridian offers three plans. Starter is billed monthly at a flat rate and includes one workspace. Team is billed monthly or annually and includes up to twenty workspaces. Anchored is billed annually only, includes unlimited workspaces, and carries the pinned release channel.\n\n## Refunds\n\nRefunds are issued within fourteen days of the billing date for annual plans. Monthly plans are not refundable once the billing date has passed, but a monthly plan can be cancelled at any time and will remain active until the end of the paid period. A refund on an annual plan is prorated against whole months consumed, not days.\n\nRefund requests are processed by the billing service within two business days. A refund that fails to process automatically is escalated to a billing operator, who may issue an account credit instead if the original payment method is no longer valid.\n\n## Overage\n\nWorkspace overage on the Team plan is billed at the end of the cycle rather than blocking creation, so a burst of workspace creation never interrupts work. Overage charges appear as a separate line item and are not eligible for the fourteen day refund window, because they represent consumption that already occurred.\n\n## Invoices\n\nInvoices are generated on the billing date and retained for seven years for tax purposes. An invoice can be reissued with corrected billing details, which produces a superseding invoice rather than editing the original. The original remains retrievable through the invoice history endpoint."
+    },
+    {
+      "key": "auth",
+      "title": "Meridian Authentication",
+      "text": "# Meridian Authentication\n\n## Token Types\n\nMeridian issues three token types. A session token is short lived and is used by the web console; it expires after thirty minutes of inactivity. A workspace token is scoped to a single workspace and is used by automation; it expires after ninety days and can be rotated without downtime by issuing the replacement before revoking the original. A service token is scoped to the whole account, never expires, and may only be created by an account owner.\n\nService tokens are the highest risk credential in Meridian. They are displayed exactly once at creation and are stored only as a hash, so a lost service token cannot be recovered and must be replaced.\n\n## Rotation\n\nWorkspace token rotation is a two step process. First issue a replacement token, which produces a second valid credential for the same workspace. Then update the consumers and revoke the original. Both tokens are valid during the overlap, which may last up to seven days; after seven days the original is revoked automatically whether or not it is still in use.\n\n## Failed Authentication\n\nFive consecutive failed authentication attempts against the same account lock the account for fifteen minutes. The lock applies to interactive sign in only and does not affect workspace or service tokens, because locking automation out during a credential problem tends to turn an incident into an outage. Failed attempts are recorded in the audit log with the source address but never with the attempted credential."
+    },
+    {
+      "key": "retention",
+      "title": "Meridian Data Retention",
+      "text": "# Meridian Data Retention\n\n## Retention Windows\n\nMeridian retains different classes of data for different periods. Audit log entries are retained for four hundred days. Application logs are retained for thirty days. Deleted workspaces are held in a recoverable state for sixty days before being purged, during which an account owner can restore them in full.\n\nInvoices are excluded from these windows and are retained for seven years, which is a tax requirement rather than a product decision.\n\n## Deletion Requests\n\nA verified deletion request removes account data within thirty days. Backups are excluded from the thirty day window and age out on their own ninety day cycle, so data may persist in backup for up to ninety days after a deletion request completes. This is disclosed at request time rather than discovered afterwards.\n\nDeletion does not remove aggregate usage counters, because they contain no identifying information and are required for capacity planning.\n\n## Export\n\nAn account owner can export all workspace content at any time. The export is produced asynchronously and is available for seven days as a single archive. Exports are rate limited to one per account per twenty four hours, because generating one reads the full workspace history."
+    },
+    {
+      "key": "ratelimits",
+      "title": "Meridian API Rate Limits",
+      "text": "# Meridian API Rate Limits\n\n## Limits by Token Type\n\nRate limits in Meridian are applied per token, not per account, so one noisy automation cannot starve the rest of an account. A session token is limited to sixty requests per minute. A workspace token is limited to six hundred requests per minute. A service token is limited to three thousand requests per minute.\n\nLimits are enforced with a sliding window rather than a fixed bucket, so a client cannot double its effective rate by straddling a window boundary.\n\n## Exceeding a Limit\n\nExceeding a rate limit returns a rate limited response with a retry after header giving the number of seconds until capacity is available. Clients should honour the retry after value rather than retrying immediately; repeated immediate retries against a limited token extend the window rather than resetting it.\n\nA token that exceeds its limit continuously for more than one hour is flagged for review, and an account owner is notified. The token is not revoked automatically, because an automatic revocation during a traffic spike would convert a performance problem into an outage.\n\n## Increases\n\nRate limit increases are available on the Team and Anchored plans and are applied per token type. An increase request requires a description of the workload, because the limits exist to protect shared capacity and an increase is granted against a specific expected pattern."
+    },
+    {
+      "key": "incidents",
+      "title": "Meridian Incident Response",
+      "text": "# Meridian Incident Response\n\n## Severity Levels\n\nMeridian classifies incidents into three severities. A severity one incident is a full outage or a confirmed data exposure and pages the on call engineer immediately. A severity two incident is a partial degradation affecting more than ten percent of requests and pages during business hours only. A severity three incident is a defect with a workaround and is triaged on the next working day.\n\nSeverity is set by the first responder and can be raised by anyone, but can only be lowered by the incident commander, so that pressure to close an incident cannot quietly downgrade it.\n\n## Declaring an Incident\n\nAn incident is declared with the meridian incident declare command, which opens a channel, pages according to severity, and starts the timeline. The timeline is append only. Every subsequent status update is recorded against it, and the timeline becomes the basis of the review.\n\n## Review\n\nEvery severity one and severity two incident gets a written review within five working days. The review is blameless and focuses on the conditions that allowed the failure rather than on the person who triggered it. A review that identifies no action items is acceptable and is sometimes the correct outcome, but it must say so explicitly rather than leaving the section empty."
+    }
+  ],
+  "queries": [
+    {
+      "id": "q_rollback_basic",
+      "query": "How do I roll back a bad deploy in Meridian?",
+      "relevant": [{"document": "deployment", "contains": "rollback command restores"}],
+      "reference": "Run the meridian rollback command with the previous release tag. It restores the previous container image, drains in-flight connections over thirty seconds, and swaps the routing table. It does not revert database migrations."
+    },
+    {
+      "id": "q_rollback_age_limit",
+      "query": "Why did my rollback fail with a registry miss?",
+      "relevant": [{"document": "deployment", "contains": "older than fourteen days"}],
+      "reference": "Rollback is blocked when the target release tag is older than fourteen days, because artifacts older than that are garbage collected from the registry. Restore the artifact from cold storage first, which takes about eight minutes."
+    },
+    {
+      "id": "q_readiness_probe",
+      "query": "What does the readiness probe check?",
+      "relevant": [{"document": "deployment", "contains": "readiness probe queries"}],
+      "reference": "It queries the primary database, the graph store, and the object cache. A failure removes the instance from the load balancer rotation but does not terminate it."
+    },
+    {
+      "id": "q_annual_refund",
+      "query": "Can I get a refund on an annual plan?",
+      "relevant": [{"document": "billing", "contains": "within fourteen days of the billing date"}],
+      "reference": "Yes, within fourteen days of the billing date. The refund is prorated against whole months consumed, not days."
+    },
+    {
+      "id": "q_overage_refund",
+      "query": "Are overage charges refundable?",
+      "relevant": [{"document": "billing", "contains": "not eligible for the fourteen day refund"}],
+      "reference": "No. Overage charges are not eligible for the fourteen day refund window, because they represent consumption that already occurred."
+    },
+    {
+      "id": "q_service_token_lost",
+      "query": "I lost my service token, can I recover it?",
+      "relevant": [{"document": "auth", "contains": "cannot be recovered"}],
+      "reference": "No. Service tokens are displayed once at creation and stored only as a hash, so a lost service token must be replaced rather than recovered."
+    },
+    {
+      "id": "q_token_rotation",
+      "query": "How do I rotate a workspace token without downtime?",
+      "relevant": [{"document": "auth", "contains": "issue a replacement token"}],
+      "reference": "Issue a replacement token first, update the consumers, then revoke the original. Both are valid during an overlap of up to seven days, after which the original is revoked automatically."
+    },
+    {
+      "id": "q_account_lockout",
+      "query": "What happens after repeated failed sign in attempts?",
+      "relevant": [{"document": "auth", "contains": "lock the account for fifteen minutes"}],
+      "reference": "Five consecutive failed attempts lock the account for fifteen minutes. The lock applies to interactive sign in only and does not affect workspace or service tokens."
+    },
+    {
+      "id": "q_audit_retention",
+      "query": "How long are audit logs kept?",
+      "relevant": [{"document": "retention", "contains": "audit log entries are retained for four hundred days"}],
+      "reference": "Audit log entries are retained for four hundred days. Application logs are retained for thirty days."
+    },
+    {
+      "id": "q_deletion_backups",
+      "query": "After I request deletion, how long does data stay in backups?",
+      "relevant": [{"document": "retention", "contains": "ninety day cycle"}],
+      "reference": "Backups are excluded from the thirty day deletion window and age out on their own ninety day cycle, so data may persist in backup for up to ninety days."
+    },
+    {
+      "id": "q_rate_limit_service_token",
+      "query": "What is the rate limit for a service token?",
+      "relevant": [{"document": "ratelimits", "contains": "three thousand requests per minute"}],
+      "reference": "A service token is limited to three thousand requests per minute. Limits are applied per token rather than per account."
+    },
+    {
+      "id": "q_rate_limit_exceeded",
+      "query": "What should a client do when it gets rate limited?",
+      "relevant": [{"document": "ratelimits", "contains": "honour the retry after value"}],
+      "reference": "Honour the retry after header rather than retrying immediately. Repeated immediate retries extend the window rather than resetting it."
+    },
+    {
+      "id": "q_sev_one",
+      "query": "What counts as a severity one incident?",
+      "relevant": [{"document": "incidents", "contains": "full outage or a confirmed data exposure"}],
+      "reference": "A full outage or a confirmed data exposure. It pages the on call engineer immediately."
+    },
+    {
+      "id": "q_lower_severity",
+      "query": "Who is allowed to lower the severity of an incident?",
+      "relevant": [{"document": "incidents", "contains": "only be lowered by the incident commander"}],
+      "reference": "Only the incident commander can lower severity, though anyone can raise it."
+    },
+    {
+      "id": "q_invoice_retention_cross_doc",
+      "query": "How long are invoices retained?",
+      "relevant": [
+        {"document": "billing", "contains": "retained for seven years"},
+        {"document": "retention", "contains": "retained for seven years"}
+      ],
+      "reference": "Invoices are retained for seven years, which is a tax requirement. They are excluded from the standard retention windows.",
+      "_note": "Deliberately answerable from two documents — tests that fusion rewards agreement rather than double-counting."
+    },
+    {
+      "id": "q_pinned_channel_cross_doc",
+      "query": "Which plan gets the pinned release channel?",
+      "relevant": [
+        {"document": "billing", "contains": "carries the pinned release channel"},
+        {"document": "deployment", "contains": "Anchored support tier"}
+      ],
+      "reference": "The Anchored plan carries the pinned release channel, which never advances automatically and upgrades on a schedule the customer controls.",
+      "_note": "Requires joining a billing fact to a deployment fact."
+    },
+    {
+      "id": "q_unanswerable_sso",
+      "query": "How do I configure SAML single sign-on in Meridian?",
+      "relevant": [],
+      "reference": "NOT_IN_CORPUS",
+      "_note": "Nothing in the corpus covers SSO. The correct behaviour is the honest empty path, not a plausible invention. Excluded from recall/nDCG averages; scored separately as an abstention check."
+    },
+    {
+      "id": "q_unanswerable_pricing",
+      "query": "What is the exact monthly price of the Team plan in euros?",
+      "relevant": [],
+      "reference": "NOT_IN_CORPUS",
+      "_note": "The corpus names the plans but never states a price. A retriever will surface the billing document; the generator must still decline to state a number."
+    }
+  ]
+}
