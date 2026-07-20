@@ -16,10 +16,13 @@ from agents.crews.tools.async_bridge import run_async
 
 
 class GraphSearchInput(BaseModel):
-    """Input schema for the graph search tool."""
+    """Input schema for the graph search tool.
+
+    Deliberately carries no ``user_id`` — see ``VectorSearchInput``.
+    """
 
     entity_name: str = Field(description="Name of the entity to search for in the knowledge graph.")
-    max_hops: int = Field(default=2, description="Maximum relationship hops to traverse (1-3).")
+    max_hops: int = Field(default=2, ge=1, le=3, description="Maximum relationship hops to traverse (1-3).")
 
 
 class GraphSearchTool(BaseTool):
@@ -28,17 +31,26 @@ class GraphSearchTool(BaseTool):
         "Search the Neo4j knowledge graph for entities and their relationships. "
         "Traverses multi-hop connections to find related people, topics, "
         "preferences, and facts. Use this for understanding user context, "
-        "preferences, and relationship-based reasoning."
+        "preferences, and relationship-based reasoning. The traversal is "
+        "automatically confined to the current user's subgraph."
     )
     args_schema: Type[BaseModel] = GraphSearchInput
 
+    # Request-scoped tenant boundary, set by SupportCrew at construction.
+    # Not part of args_schema: the LLM can neither read nor override it.
+    user_id: str
+
     def _run(self, entity_name: str, max_hops: int = 2) -> str:
-        """Traverse the knowledge graph for related entities."""
+        """Traverse this user's subgraph for related entities."""
         from app.services.graph_search import find_related_entities
 
         try:
             results = run_async(
-                find_related_entities(entity_name, max_hops=min(max_hops, 3))
+                find_related_entities(
+                    entity_name,
+                    user_id=self.user_id,
+                    max_hops=min(max_hops, 3),
+                )
             )
         except Exception as e:
             return f"Graph search error: {e}"

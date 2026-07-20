@@ -10,6 +10,7 @@ thread-local async engine to avoid per-invocation connection overhead.
 
 import threading
 from typing import Type
+from uuid import UUID
 
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -44,10 +45,16 @@ def _get_thread_engine():
 
 
 class VectorSearchInput(BaseModel):
-    """Input schema for the vector search tool."""
+    """Input schema for the vector search tool.
+
+    Deliberately carries no ``user_id``. Tenant scope is bound to the tool
+    instance at construction time so the LLM cannot name a tenant — anything
+    reachable from this schema is attacker-influenceable via prompt injection
+    in retrieved content.
+    """
 
     query: str = Field(description="The search query to find semantically similar content.")
-    limit: int = Field(default=5, description="Maximum number of results to return.")
+    limit: int = Field(default=5, ge=1, le=20, description="Maximum number of results to return.")
 
 
 class VectorSearchTool(BaseTool):
@@ -56,12 +63,27 @@ class VectorSearchTool(BaseTool):
         "Search the vector database (PostgreSQL + pgvector) for messages "
         "semantically similar to the query. Returns ranked results with "
         "content and similarity context. Use this for finding relevant "
-        "past conversations and documents."
+        "past conversations and documents. The search is automatically "
+        "confined to the current user — you cannot search other users."
     )
     args_schema: Type[BaseModel] = VectorSearchInput
 
+    # Request-scoped tenant boundary, set by SupportCrew at construction.
+    # Not part of args_schema: the LLM can neither read nor override it.
+    user_id: str
+
     def _run(self, query: str, limit: int = 5) -> str:
-        """Embed the query and search pgvector for similar messages."""
+        """Embed the query and search this user's messages in pgvector."""
+        try:
+            scoped_user_id = UUID(str(self.user_id))
+        except (TypeError, ValueError):
+            # Fail closed: an unparseable scope must not become an
+            # unscoped search.
+            return (
+                "Vector search unavailable: the current user scope is not a "
+                "valid identifier."
+            )
+
         query_embedding = embed_text(query)
 
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -77,6 +99,7 @@ class VectorSearchTool(BaseTool):
                 return await search_similar_messages(
                     db=db,
                     query_embedding=query_embedding,
+                    user_id=scoped_user_id,
                     limit=limit,
                 )
 

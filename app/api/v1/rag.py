@@ -11,7 +11,7 @@ Request flow:
 
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Request, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -50,8 +50,8 @@ def _process_memory_background(query: str, answer: str, user_id: str):
     t0 = time.perf_counter()
 
     try:
-        result = MemoryCrew().crew().kickoff(
-            inputs={"transcript": transcript, "user_id": user_id}
+        result = MemoryCrew(user_id=user_id).crew().kickoff(
+            inputs={"transcript": transcript}
         )
         elapsed = time.perf_counter() - t0
         logger.info(
@@ -102,7 +102,19 @@ async def rag_query(
         user=user,
         is_service_request=is_valid_rag_service_request(http_request),
     )
-    effective_user_id = resolved_user_id or "anonymous"
+
+    # Every store this endpoint reads — pgvector messages, the Neo4j
+    # subgraph, Mem0 memories — is user-owned, so there is nothing an
+    # unscoped caller can legitimately retrieve. This previously fell back to
+    # a literal "anonymous" scope, which ran the full crew against every
+    # tenant's data. Requiring identity closes that and removes an
+    # unauthenticated path to a ~15-LLM-call request.
+    if resolved_user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication or an internal service token is required for RAG queries.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     # ── Step 0: Sanitize Inbound Query ──────────────────────
     sanitized = sanitize_query(request.query)
@@ -195,15 +207,13 @@ async def rag_query(
     from agents.crews.support_crew import SupportCrew
 
     def _run_crew_sync():
+        # user_id is a constructor arg, not a kickoff input: it binds the
+        # retrieval tools' scope directly instead of being interpolated into
+        # prompt text for the agent to pass along.
         return (
-            SupportCrew()
+            SupportCrew(user_id=resolved_user_id)
             .crew()
-            .kickoff(
-                inputs={
-                    "query": request.query,
-                    "user_id": effective_user_id,
-                }
-            )
+            .kickoff(inputs={"query": request.query})
         )
 
     t0 = time.perf_counter()

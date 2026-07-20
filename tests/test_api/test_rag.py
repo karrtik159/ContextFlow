@@ -35,11 +35,19 @@ async def _direct_answer(*args, **kwargs):
 class _FakeCrewRunner:
     def kickoff(self, *, inputs):
         assert inputs["query"] == "How does the worker reach the backend?"
-        assert inputs["user_id"] == "anonymous"
+        # user_id is a SupportCrew constructor arg now, never a kickoff input.
+        assert "user_id" not in inputs
         return "The worker calls the FastAPI RAG endpoint over HTTP."
 
 
 class _FakeSupportCrew:
+    """Records the tenant scope the endpoint constructed the crew with."""
+
+    last_user_id: str | None = None
+
+    def __init__(self, user_id):
+        type(self).last_user_id = user_id
+
     def crew(self):
         return _FakeCrewRunner()
 
@@ -51,6 +59,7 @@ async def _auth_user():
 @pytest.mark.asyncio
 async def test_rag_query_crewai_path(monkeypatch):
     """Full HTTP roundtrip through the RAG endpoint — crew path."""
+    app.dependency_overrides[get_optional_user] = _auth_user
     monkeypatch.setattr("agents.crews.support_crew.SupportCrew", _FakeSupportCrew)
     # Force intent classifier to say "needs RAG"
     monkeypatch.setattr(
@@ -64,24 +73,30 @@ async def test_rag_query_crewai_path(monkeypatch):
     )
     monkeypatch.setattr("app.api.v1.rag._process_memory_background", lambda *args, **kwargs: None)
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/rag/query",
-            json={"query": "How does the worker reach the backend?"},
-        )
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/rag/query",
+                json={"query": "How does the worker reach the backend?"},
+            )
+    finally:
+        app.dependency_overrides.clear()
 
     assert response.status_code == 200
     data = response.json()
     assert data["answer"] == "The worker calls the FastAPI RAG endpoint over HTTP."
     assert data["query"] == "How does the worker reach the backend?"
-    assert data["user_id"] is None
+    assert data["user_id"] == "user-123"
     assert data["routed_to"] == "crewai"
+    # The crew must be bound to the authenticated identity, not a sentinel.
+    assert _FakeSupportCrew.last_user_id == "user-123"
 
 
 @pytest.mark.asyncio
 async def test_rag_query_direct_path(monkeypatch):
     """Full HTTP roundtrip — direct chat path (bypasses CrewAI)."""
+    app.dependency_overrides[get_optional_user] = _auth_user
     # Force intent classifier to say "simple chat"
     monkeypatch.setattr(
         "app.services.llm_provider.classify_intent",
@@ -97,13 +112,17 @@ async def test_rag_query_direct_path(monkeypatch):
         "app.services.embeddings.embed_text_async_safe",
         _no_embedding,
     )
+    monkeypatch.setattr("app.api.v1.rag._process_memory_background", lambda *args, **kwargs: None)
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/rag/query",
-            json={"query": "Hello!"},
-        )
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/rag/query",
+                json={"query": "Hello!"},
+            )
+    finally:
+        app.dependency_overrides.clear()
 
     assert response.status_code == 200
     data = response.json()
@@ -148,12 +167,17 @@ async def test_rag_query_service_token_can_supply_user_id(monkeypatch):
     )
     monkeypatch.setattr("app.api.v1.rag._process_memory_background", lambda *args, **kwargs: None)
 
+    captured_scope: dict[str, str] = {}
+
     class FakeCrewRunner:
         def kickoff(self, *, inputs):
-            assert inputs["user_id"] == "user-123"
+            assert "user_id" not in inputs
             return "Scoped answer from the knowledge service."
 
     class FakeSupportCrew:
+        def __init__(self, user_id):
+            captured_scope["user_id"] = user_id
+
         def crew(self):
             return FakeCrewRunner()
 
@@ -171,23 +195,32 @@ async def test_rag_query_service_token_can_supply_user_id(monkeypatch):
     data = response.json()
     assert data["user_id"] == "user-123"
     assert data["routed_to"] == "crewai"
+    # Service-token callers may assert a scope; it must reach the crew intact.
+    assert captured_scope["user_id"] == "user-123"
 
 
 @pytest.mark.asyncio
-async def test_rag_query_anonymous_does_not_use_semantic_cache(monkeypatch):
-    monkeypatch.setattr("agents.crews.support_crew.SupportCrew", _FakeSupportCrew)
-    monkeypatch.setattr(
-        "app.services.llm_provider.classify_intent",
-        _needs_rag,
-    )
+async def test_rag_query_anonymous_is_rejected(monkeypatch):
+    """Anonymous callers get 401 — they have no retrievable, scoped corpus.
+
+    Every store behind this endpoint is user-owned, so an unscoped run could
+    only either return nothing or (as it previously did) read across all
+    tenants. It also removes an unauthenticated path to a multi-agent,
+    ~15-LLM-call request.
+    """
+
+    def fail_crew(*args, **kwargs):
+        raise AssertionError("anonymous RAG requests must never construct a crew")
 
     async def fail_embedding(*args, **kwargs):
         raise AssertionError("anonymous RAG requests must not generate cache embeddings")
 
-    monkeypatch.setattr(
-        "app.services.embeddings.embed_text_async_safe",
-        fail_embedding,
-    )
+    async def fail_classify(*args, **kwargs):
+        raise AssertionError("anonymous requests must be rejected before intent classification")
+
+    monkeypatch.setattr("agents.crews.support_crew.SupportCrew", fail_crew)
+    monkeypatch.setattr("app.services.llm_provider.classify_intent", fail_classify)
+    monkeypatch.setattr("app.services.embeddings.embed_text_async_safe", fail_embedding)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -196,8 +229,7 @@ async def test_rag_query_anonymous_does_not_use_semantic_cache(monkeypatch):
             json={"query": "How does the worker reach the backend?"},
         )
 
-    assert response.status_code == 200
-    assert response.json()["routed_to"] == "crewai"
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio
