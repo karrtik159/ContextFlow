@@ -56,6 +56,53 @@ async def _auth_user():
     return {"id": "user-123", "username": "user-123"}
 
 
+# ── Phase 2 helpers ──────────────────────────────────────────
+# Retrieval is deterministic now, so the crew path needs a real embedding and a
+# stubbed pipeline rather than the old "no embedding" shortcut. A None
+# embedding legitimately means dense retrieval cannot run, which degrades to
+# direct_fallback (see test_rag_query_degrades_when_embedding_unavailable).
+
+
+async def _an_embedding(*args, **kwargs):
+    return [0.1, 0.2, 0.3]
+
+
+def _stub_retrieval(monkeypatch, chunk_text="Retrieved supporting evidence."):
+    """Make run_retrieval return one chunk without touching PostgreSQL."""
+    import uuid as _uuid
+
+    from app.services.retrieval.contracts import RetrievalTrace, RetrievedChunk
+
+    async def fake_run_retrieval(db, **kwargs):
+        trace = RetrievalTrace(
+            trace_id=_uuid.uuid4(),
+            user_id=kwargs["user_id"],
+            original_query=kwargs["original_query"],
+            normalized_query=kwargs["retrieval_query"],
+        )
+        trace.final_chunks = [
+            RetrievedChunk(
+                text=chunk_text, source="vector", rank=1, score=0.9,
+                chunk_id=_uuid.uuid4(), citation_label="[1]",
+            )
+        ]
+        return trace
+
+    async def fake_persist_trace(**kwargs):
+        return None
+
+    async def fake_populate_cache(**kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.rag_service.run_retrieval", fake_run_retrieval)
+    monkeypatch.setattr("app.services.trace_store.persist_trace", fake_persist_trace)
+    # A grounded crew answer is now genuinely cacheable, so the background task
+    # fires and would reach Neo4j.
+    monkeypatch.setattr(
+        "app.services.semantic_cache.populate_semantic_cache", fake_populate_cache
+    )
+
+
 @pytest.mark.asyncio
 async def test_rag_query_crewai_path(monkeypatch):
     """Full HTTP roundtrip through the RAG endpoint — crew path."""
@@ -66,11 +113,16 @@ async def test_rag_query_crewai_path(monkeypatch):
         "app.services.llm_provider.classify_intent",
         _needs_rag,
     )
-    # Skip embedding + cache
     monkeypatch.setattr(
         "app.services.embeddings.embed_text_async_safe",
-        _no_embedding,
+        _an_embedding,
     )
+
+    async def _no_cache(**kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.semantic_cache.get_cached_response", _no_cache)
+    _stub_retrieval(monkeypatch)
     monkeypatch.setattr("app.api.v1.rag._process_memory_background", lambda *args, **kwargs: None)
 
     try:
@@ -163,8 +215,14 @@ async def test_rag_query_service_token_can_supply_user_id(monkeypatch):
     )
     monkeypatch.setattr(
         "app.services.embeddings.embed_text_async_safe",
-        _no_embedding,
+        _an_embedding,
     )
+
+    async def _no_cache(**kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.semantic_cache.get_cached_response", _no_cache)
+    _stub_retrieval(monkeypatch)
     monkeypatch.setattr("app.api.v1.rag._process_memory_background", lambda *args, **kwargs: None)
 
     captured_scope: dict[str, str] = {}
@@ -275,3 +333,69 @@ async def test_rag_query_authenticated_cache_is_user_scoped(monkeypatch):
     assert data["user_id"] == "user-123"
     assert data["routed_to"] == "cache"
     assert captured["user_id"] == "user-123"
+
+
+@pytest.mark.asyncio
+async def test_rag_query_degrades_when_embedding_unavailable(monkeypatch):
+    """No embedding means the dense arm — the primary one — cannot run.
+
+    Answering anyway from graph and memory scraps would produce a thinly
+    grounded answer wearing the "crewai" label. Degrading to direct chat and
+    saying so via routed_to is the honest outcome.
+    """
+    app.dependency_overrides[get_optional_user] = _auth_user
+    monkeypatch.setattr("app.services.llm_provider.classify_intent", _needs_rag)
+    monkeypatch.setattr("app.services.embeddings.embed_text_async_safe", _no_embedding)
+    monkeypatch.setattr("app.services.llm_provider.direct_chat", _direct_answer)
+
+    def fail_crew(*args, **kwargs):
+        raise AssertionError("must not run the crew without a usable embedding")
+
+    monkeypatch.setattr("agents.crews.support_crew.SupportCrew", fail_crew)
+    monkeypatch.setattr("app.api.v1.rag._process_memory_background", lambda *a, **k: None)
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/rag/query", json={"query": "What did I decide?"}
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["routed_to"] == "direct_fallback"
+
+
+@pytest.mark.asyncio
+async def test_rag_query_returns_citations_and_trace_id(monkeypatch):
+    """Every non-cached knowledge answer carries resolvable citations."""
+    app.dependency_overrides[get_optional_user] = _auth_user
+    monkeypatch.setattr("agents.crews.support_crew.SupportCrew", _FakeSupportCrew)
+    monkeypatch.setattr("app.services.llm_provider.classify_intent", _needs_rag)
+    monkeypatch.setattr("app.services.embeddings.embed_text_async_safe", _an_embedding)
+
+    async def _no_cache(**kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.semantic_cache.get_cached_response", _no_cache)
+    _stub_retrieval(monkeypatch)
+    monkeypatch.setattr("app.api.v1.rag._process_memory_background", lambda *a, **k: None)
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/rag/query",
+                json={"query": "How does the worker reach the backend?"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    data = response.json()
+    assert data["trace_id"], "a knowledge answer must carry a trace id"
+    assert len(data["citations"]) == 1
+    citation = data["citations"][0]
+    assert citation["label"] == "[1]"
+    assert citation["source"] == "vector"
+    assert citation["chunk_id"]

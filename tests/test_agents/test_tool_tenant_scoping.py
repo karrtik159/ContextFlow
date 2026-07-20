@@ -1,7 +1,7 @@
 """
-Regression guards for the CrewAI tool tenant boundary.
+Regression guards for the tenant boundary.
 
-Context — all three retrieval tools previously leaked across tenants:
+Context — retrieval previously leaked across tenants three separate ways:
 
   * ``VectorSearchTool`` called ``search_similar_messages`` without a
     ``user_id``, and that filter was applied conditionally, so the query
@@ -9,38 +9,38 @@ Context — all three retrieval tools previously leaked across tenants:
   * ``find_related_entities`` had no ``user_id`` predicate at all.
   * ``MemorySearchTool`` / ``MemoryStoreTool`` took ``user_id`` as an
     **LLM-filled argument**, with the intended value interpolated into task
-    prompt text. That makes the tenant boundary a suggestion the model is
-    asked to honour, which prompt-injected content in retrieved documents
-    can override — for the store tool, that meant cross-tenant writes.
+    prompt text. That makes the tenant boundary a suggestion the model is asked
+    to honour, which prompt-injected content in retrieved documents can
+    override — for the store tool, that meant cross-tenant writes.
 
-The invariant these tests protect: **tenant scope is bound to the tool
-instance at construction and is never reachable from the LLM-facing schema.**
+The invariant: **tenant scope is structural — bound to the object at
+construction or passed as a required argument, and never reachable from an
+LLM-facing schema.**
+
+Phase 2 moved retrieval out of the agent loop entirely, so the three retrieval
+tools are gone. Scope for retrieval is now a required function argument with no
+model in the call path, which is strictly stronger than a non-addressable
+pydantic field. These tests were retargeted accordingly: the surviving tool is
+covered as before, and equivalent guards now cover the retrieval sources that
+replaced the deleted tools.
 """
+
+import asyncio
+import inspect
+import uuid
 
 import pytest
 
-from agents.crews.tools.graph_search_tool import GraphSearchInput, GraphSearchTool
-from agents.crews.tools.mem0_tool import (
-    MemorySearchInput,
-    MemorySearchTool,
-    MemoryStoreInput,
-    MemoryStoreTool,
-)
-from agents.crews.tools.vector_search_tool import VectorSearchInput, VectorSearchTool
+from agents.crews.tools.mem0_tool import MemoryStoreInput, MemoryStoreTool
 
-# (schema, tool class) for every tenant-scoped tool.
+# (schema, tool class) for every tenant-scoped LLM-facing tool that remains.
 SCOPED_TOOLS = [
-    (VectorSearchInput, VectorSearchTool),
-    (GraphSearchInput, GraphSearchTool),
-    (MemorySearchInput, MemorySearchTool),
     (MemoryStoreInput, MemoryStoreTool),
 ]
 
 
 @pytest.mark.parametrize(
-    "schema,tool_cls",
-    SCOPED_TOOLS,
-    ids=lambda v: getattr(v, "__name__", str(v)),
+    "schema,tool_cls", SCOPED_TOOLS, ids=lambda v: getattr(v, "__name__", str(v))
 )
 def test_user_id_is_not_llm_addressable(schema, tool_cls):
     """The LLM-facing args schema must not expose user_id.
@@ -55,9 +55,7 @@ def test_user_id_is_not_llm_addressable(schema, tool_cls):
 
 
 @pytest.mark.parametrize(
-    "schema,tool_cls",
-    SCOPED_TOOLS,
-    ids=lambda v: getattr(v, "__name__", str(v)),
+    "schema,tool_cls", SCOPED_TOOLS, ids=lambda v: getattr(v, "__name__", str(v))
 )
 def test_user_id_is_a_required_constructor_field(schema, tool_cls):
     """Constructing a scoped tool without a user_id must fail loudly."""
@@ -66,26 +64,116 @@ def test_user_id_is_a_required_constructor_field(schema, tool_cls):
         tool_cls()
 
 
-def test_vector_search_rejects_missing_user_id():
-    """The service function must refuse an unscoped search outright.
+def test_deleted_retrieval_tools_are_not_reintroduced():
+    """The retrieval tools were removed because retrieval left the agent loop.
 
-    Defence in depth: even if a future caller forgets to pass a scope, the
-    query must not silently become a cross-tenant scan.
+    Reintroducing one would put a tenant-parameterized retrieval tool back in
+    the hands of an agent that reads attacker-influenceable content — the exact
+    stored-injection -> exfiltration loop that removing them closed (§5.5).
     """
-    import asyncio
+    import agents.crews.tools as tools_pkg
 
-    from app.services.vector_search import search_similar_messages
+    module_dir = tools_pkg.__path__[0]
+    import os
 
-    with pytest.raises(ValueError, match="user_id"):
-        asyncio.run(
-            search_similar_messages(db=None, query_embedding=[0.1], user_id=None)
+    present = {f for f in os.listdir(module_dir) if f.endswith(".py")}
+    for forbidden in {"vector_search_tool.py", "graph_search_tool.py"}:
+        assert forbidden not in present, (
+            f"{forbidden} was deleted in Phase 2. Retrieval is deterministic and "
+            f"must not be reachable from an agent."
         )
 
 
-def test_graph_search_rejects_missing_user_id():
-    """Graph traversal must refuse to run unscoped."""
-    import asyncio
+def test_synthesizer_holds_no_tools():
+    """The synthesizer reads retrieved content, so it must hold no tools."""
+    source = inspect.getsource(
+        __import__("agents.crews.support_crew", fromlist=["SupportCrew"])
+    )
+    assert "tools=[]" in source, "answer_synthesizer must be constructed with no tools"
 
+
+# ── Retrieval sources — scope is a required argument ────────
+
+def test_search_chunks_rejects_missing_user_id():
+    from app.services.retrieval.sources import search_chunks
+
+    with pytest.raises(ValueError, match="user_id"):
+        asyncio.run(search_chunks(None, query_embedding=[0.1], user_id=None))
+
+
+def test_search_messages_rejects_missing_user_id():
+    from app.services.retrieval.sources import search_messages
+
+    with pytest.raises(ValueError, match="user_id"):
+        asyncio.run(search_messages(None, query_embedding=[0.1], user_id=None))
+
+
+def test_search_graph_rejects_missing_user_id():
+    from app.services.retrieval.sources import search_graph
+
+    with pytest.raises(ValueError, match="user_id"):
+        asyncio.run(search_graph(query="anything", user_id=""))
+
+
+def test_search_memory_rejects_missing_user_id():
+    from app.services.retrieval.sources import search_memory
+
+    with pytest.raises(ValueError, match="user_id"):
+        asyncio.run(search_memory(query="anything", user_id=""))
+
+
+def test_run_retrieval_rejects_missing_user_id():
+    from app.services.retrieval.pipeline import run_retrieval
+
+    with pytest.raises(ValueError, match="user_id"):
+        asyncio.run(
+            run_retrieval(
+                None,
+                user_id="",
+                original_query="q",
+                retrieval_query="q",
+                query_embedding=[0.1],
+            )
+        )
+
+
+def test_run_retrieval_fails_closed_on_unparseable_scope():
+    """A malformed scope returns nothing; it never widens into an unscoped run."""
+    from app.services.retrieval.pipeline import run_retrieval
+
+    trace = asyncio.run(
+        run_retrieval(
+            None,
+            user_id="not-a-uuid",
+            original_query="q",
+            retrieval_query="q",
+            query_embedding=[0.1],
+        )
+    )
+    assert trace.final_chunks == []
+    assert not trace.has_context
+    assert any(s.metadata.get("failed_closed") for s in trace.stages)
+
+
+def test_chunk_query_filters_on_chunks_user_id_directly():
+    """The dense arm must filter on chunks.user_id, not via a join to documents.
+
+    An HNSW scan applies the WHERE clause after walking its candidate list, so a
+    tenant filter on a joined table silently collapses recall as the table
+    grows. This is a correctness property, not a performance nicety.
+    """
+    from app.services.retrieval import sources
+
+    source = inspect.getsource(sources.search_chunks)
+    assert "Chunk.user_id == user_id" in source
+    assert "Document" not in source, (
+        "search_chunks must not reach documents for the tenant filter"
+    )
+
+
+# ── Legacy service-level guards, still enforced ─────────────
+
+def test_graph_search_rejects_missing_user_id():
     from app.services.graph_search import find_related_entities
 
     with pytest.raises(ValueError, match="user_id"):
@@ -98,20 +186,64 @@ def test_graph_search_cypher_scopes_both_path_endpoints():
     Scoping only the start node would still let a path walk out into another
     tenant's subgraph and return their entity names.
     """
-    import inspect
-
     from app.services import graph_search
 
     source = inspect.getsource(graph_search.find_related_entities)
-    # Start node and end node each constrained by $user_id.
     assert source.count("user_id: $user_id") >= 2, (
         "find_related_entities must constrain both the start and end node "
         "by user_id, otherwise traversal escapes the tenant subgraph."
     )
 
 
-def test_vector_search_tool_fails_closed_on_unparseable_scope():
-    """A malformed scope must not fall through to an unscoped query."""
-    tool = VectorSearchTool(user_id="not-a-uuid")
-    result = tool._run(query="anything")
-    assert "unavailable" in result.lower()
+def test_vector_search_rejects_missing_user_id():
+    from app.services.vector_search import search_similar_messages
+
+    with pytest.raises(ValueError, match="user_id"):
+        asyncio.run(search_similar_messages(db=None, query_embedding=[0.1], user_id=None))
+
+
+def test_support_crew_requires_user_id():
+    from agents.crews.support_crew import SupportCrew
+
+    with pytest.raises(ValueError, match="user_id"):
+        SupportCrew(user_id="")
+
+
+def test_support_crew_does_not_take_user_id_as_a_kickoff_input():
+    """Scope is a constructor argument. Putting it back into kickoff inputs
+    would interpolate it into prompt text for the model to pass along."""
+    from app.services import rag_service
+
+    source = inspect.getsource(rag_service._synthesize)
+    assert 'SupportCrew(user_id=user_id)' in source
+    assert '"user_id"' not in source.split("kickoff")[-1], (
+        "user_id must not appear in kickoff inputs"
+    )
+
+
+def test_retrieval_sources_are_not_llm_tools():
+    """No retrieval function may be exposed to an agent as a tool.
+
+    Checks the module's actual objects rather than its text, so the prose
+    explaining why there is no args_schema does not trip the assertion.
+    """
+    from crewai.tools import BaseTool
+
+    from app.services.retrieval import sources
+
+    for name in dir(sources):
+        obj = getattr(sources, name)
+        if isinstance(obj, type) and issubclass(obj, BaseTool):
+            raise AssertionError(f"{name} exposes retrieval to an agent as a tool")
+        assert not hasattr(obj, "args_schema"), f"{name} looks like an LLM-facing tool"
+
+
+def test_uuid_scope_is_used_for_chunk_queries():
+    """Sanity: the sources module converts scope to UUID rather than
+    interpolating a string into SQL."""
+    from app.services.retrieval.sources import _require_user_id
+
+    scope = uuid.uuid4()
+    assert _require_user_id(scope, "fn") == scope
+    with pytest.raises(ValueError):
+        _require_user_id(None, "fn")

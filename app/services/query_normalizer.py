@@ -45,6 +45,27 @@ _FILLER_PREFIXES = [
 ]
 
 
+def normalize_for_retrieval(query: str) -> str:
+    """Light normalization for the text that actually gets searched.
+
+    Deliberately does far less than `normalize_for_cache_key`:
+
+    - NO filler stripping. "please explain X" and "X" are different requests,
+      and "can you tell me about vectors" -> "about vectors" mangles the query
+      into a fragment. Modern encoders do not need those crutches, and the
+      stripping regexes change meaning.
+    - NO lowercasing. Case carries signal for proper nouns, acronyms, and
+      identifiers, all of which are exactly what factual lookups turn on.
+    - NO PII masking. Masking is lossy; replacing an identifier with "[EMAIL]"
+      destroys the one term that would have matched.
+
+    A cache key wants aggressive collapsing so near-identical queries share an
+    entry. Retrieval wants the opposite. Using one function for both was a
+    category error — this split is the fix.
+    """
+    return re.sub(r"\s+", " ", query.strip())
+
+
 def normalize_for_cache_key(query: str) -> str:
     """Reduce a raw query to a stable semantic-cache key.
 

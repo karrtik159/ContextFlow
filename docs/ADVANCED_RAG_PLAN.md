@@ -236,6 +236,31 @@ with no warning, because `SentenceTransformer.encode()` passes
 - **Exit criteria:** a document can be ingested, chunked, embedded, and retrieved by direct SQL, with `chunks.user_id` populated and enforced.
 
 ### Phase 2 — Deterministic pipeline + trace
+
+**Status: DONE.** Tests 189→225 passed / 1 skipped; ruff 76→74. Migration
+`a7b8c9d0e1f2` verified against a throwaway container (upgrade, downgrade,
+re-upgrade). Full pipeline verified E2E with real pgvector: correct chunk ranked
+first, cross-tenant retrieval returned 0 rows, off-topic query rejected by the
+floor, all 7 stages persisted and JSONB-queryable.
+
+Deviations and findings:
+- **`RETRIEVAL_MIN_SIMILARITY = 0.25` is an unvalidated guess.** It is the one
+  number here with no empirical basis, and it is the difference between the
+  honest-empty path and answering from noise. Phase 5 must calibrate it against
+  a labelled set; it is also provider-specific.
+- The **sparse/BM25 arm stays in Phase 3** as the plan assigns it, so the
+  fan-out is dense-corpus + dense-messages + graph + memory. The GIN index from
+  Phase 1 is already in place for it.
+- **Fusion identity must be source-independent.** The first implementation
+  qualified id-less items by source, which meant the same fact from two arms
+  never fused — reducing RRF to a weighted concatenation and removing exactly
+  the cross-source agreement it exists to reward.
+- The three retrieval tools were **deleted**, not left dangling: their only
+  consumer was `context_gatherer`. `MemoryStoreTool` remains the sole LLM-facing
+  tool. Tenant guards were retargeted onto the retrieval sources.
+- `Crew(memory=False)` — CrewAI's own memory re-embeds and re-retrieves on every
+  kickoff, which would defeat the one-LLM-call goal and duplicate work the
+  pipeline just did deterministically.
 - `app/services/rag_pipeline.py` — stage framework emitting `StageRecord`, returning `RetrievalTrace`.
 - Split normalization: aggressive **cache-key** normalization vs light **retrieval** normalization. Drop the filler-stripping regexes from the retrieval path (`^please explain\s+` etc. change meaning and modern encoders don't need them).
 - Parallel fan-out via `asyncio.gather` over dense/sparse/graph/memory.

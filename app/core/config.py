@@ -146,6 +146,28 @@ class AISettings(BaseSettings):
         return v.lower().strip() if isinstance(v, str) else v
 
 
+# ── Retrieval ───────────────────────────────────────────────
+class RetrievalSettings(BaseSettings):
+    # Candidates pulled from each arm BEFORE fusion. Deliberately wider than
+    # the final context: retrieving exactly top_k makes a chunk ranked k+1
+    # unrecoverable, which is what the previous limit=5 did.
+    RETRIEVAL_CANDIDATES_PER_SOURCE: int = 25
+    RETRIEVAL_MESSAGE_CANDIDATES: int = 5
+
+    # Final context size handed to synthesis.
+    RETRIEVAL_TOP_K: int = 5
+
+    # Cosine-similarity floor for the dense arms. Applied per-source, where the
+    # score is calibrated — an RRF score is not, so it cannot carry a floor.
+    # Below this, a result is noise and is dropped even if nothing replaces it.
+    # Retrieving nothing is a valid, honest outcome; the previous code had no
+    # floor and labelled whatever came back "relevant".
+    RETRIEVAL_MIN_SIMILARITY: float = 0.25
+
+    # Reciprocal Rank Fusion constant (Cormack et al. 2009).
+    RRF_K: int = 60
+
+
 class LiveKitSettings(BaseSettings):
     LIVEKIT_URL: str = ""
     LIVEKIT_API_KEY: str = ""
@@ -175,6 +197,7 @@ class Settings(
     Neo4jSettings,
     CORSSettings,
     AISettings,
+    RetrievalSettings,
     LiveKitSettings,
     RAGServiceSettings,
     ObservabilitySettings,
