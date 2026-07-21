@@ -190,6 +190,73 @@ class RetrievalSettings(BaseSettings):
     RRF_K: int = 60
 
 
+# ── Sparse retrieval (Phase 3) ──────────────────────────────
+class SparseRetrievalSettings(BaseSettings):
+    # Dense-only retrieval fails on exact identifiers, error codes, and rare
+    # proper nouns — precisely the "factual lookup" queries the classifier
+    # routes to RAG. A release tag like "20260714-af" has no useful embedding
+    # neighbourhood; it is a literal string match or nothing.
+    SPARSE_ENABLED: bool = True
+    SPARSE_CANDIDATES: int = 25
+
+    # Postgres text-search configuration used by BOTH the query and the
+    # generated `chunks.content_tsv` column. These MUST agree: a tsquery built
+    # with 'simple' does not match a tsvector built with 'english', because
+    # stemming happens at both ends. Changing this requires a migration that
+    # re-generates content_tsv.
+    SPARSE_TS_CONFIG: str = "english"
+
+    # ts_rank_cd floor. Unlike cosine similarity, ts_rank_cd is unbounded and
+    # length-normalized by the flag we pass; a value near zero means "the terms
+    # occur but carry no weight". Kept low because the reranker, not this floor,
+    # is what decides relevance in Phase 3.
+    SPARSE_MIN_RANK: float = 0.0
+
+
+# ── Reranking (Phase 3) ─────────────────────────────────────
+class RerankSettings(BaseSettings):
+    # A cross-encoder scores (query, document) jointly instead of comparing two
+    # independently-produced vectors. Phase 5 measured why this is needed: no
+    # single cosine floor both keeps recall and rejects topically-near but
+    # unanswerable queries, because bi-encoder proximity is not relevance.
+    RERANK_ENABLED: bool = True
+    RERANK_MODEL: str = "BAAI/bge-reranker-base"
+
+    # Fused candidates handed to the cross-encoder. Retrieve wide, rerank to
+    # RETRIEVAL_TOP_K. Cost is linear in this number (~30 ms for 25 pairs on
+    # CPU), so it is a latency dial, not a correctness one.
+    RERANK_CANDIDATES: int = 25
+
+    # Relevance floor on the cross-encoder score, applied AFTER reranking and
+    # in place of trusting the cosine floor to abstain. bge-reranker emits a
+    # raw logit; we apply a sigmoid so this is a probability in [0, 1].
+    #
+    # UNCALIBRATED until measured — see scripts/run_retrieval_eval.py
+    # --sweep-rerank. 0.0 disables the floor entirely, which is the safe
+    # default until the sweep has been run against the deployed model.
+    RERANK_MIN_SCORE: float = 0.0
+
+    # Reranking must never fail a request. When the model cannot load (no
+    # weights cached, no network at boot, OOM), the pipeline keeps the fused
+    # ordering and records the failure in the trace.
+    RERANK_TIMEOUT_S: float = 10.0
+
+
+# ── Query rewriting (Phase 3) ───────────────────────────────
+class QueryRewriteSettings(BaseSettings):
+    # Deterministic, no-LLM expansion: acronym/identifier preservation and
+    # stopword-trimming for the sparse arm. Free, so on by default.
+    QUERY_EXPANSION_ENABLED: bool = True
+
+    # HyDE and multi-query each cost an LLM call per request, which is exactly
+    # the cost Phase 2 removed by deleting the ReAct loop. They are OFF by
+    # default and must earn their place against the golden set before being
+    # enabled — not turned on because the technique is well known.
+    HYDE_ENABLED: bool = False
+    MULTI_QUERY_ENABLED: bool = False
+    MULTI_QUERY_COUNT: int = 3
+
+
 class LiveKitSettings(BaseSettings):
     LIVEKIT_URL: str = ""
     LIVEKIT_API_KEY: str = ""
@@ -220,6 +287,9 @@ class Settings(
     CORSSettings,
     AISettings,
     RetrievalSettings,
+    SparseRetrievalSettings,
+    RerankSettings,
+    QueryRewriteSettings,
     LiveKitSettings,
     RAGServiceSettings,
     ObservabilitySettings,

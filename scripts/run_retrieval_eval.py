@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import sys
 import uuid
@@ -88,7 +89,33 @@ async def build_corpus(Session, golden, user_id: uuid.UUID) -> dict[str, list[tu
     return chunks_by_document
 
 
-async def evaluate(Session, golden, user_id, chunks_by_document, *, k: int, min_similarity: float):
+@contextlib.contextmanager
+def override(**values):
+    """Temporarily set settings, restoring them even on failure.
+
+    The ablation below flips SPARSE_ENABLED and RERANK_ENABLED between runs. A
+    leaked override would make every subsequent configuration measure the
+    previous one's flags and quietly report a false comparison.
+    """
+    previous = {name: getattr(settings, name) for name in values}
+    for name, value in values.items():
+        setattr(settings, name, value)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            setattr(settings, name, value)
+
+
+async def evaluate(
+    Session,
+    golden,
+    user_id,
+    chunks_by_document,
+    *,
+    k: int,
+    min_similarity: float,
+):
     """Run the real pipeline for every answerable query and score it."""
     from app.services.embeddings import embed_text_async
     from app.services.retrieval.pipeline import run_retrieval
@@ -178,6 +205,120 @@ def print_report(scores, abstentions, k: int, min_similarity: float) -> dict:
     return {"aggregate": agg, "abstentions": abstentions}
 
 
+# The four configurations that answer "did Phase 3 help?". Each isolates one
+# addition, because "dense + sparse + rerank beats dense" does not say which of
+# the two additions did the work — or whether one of them hurt and the other
+# more than compensated.
+ABLATIONS = [
+    ("dense only (Phase 2)", {"SPARSE_ENABLED": False, "RERANK_ENABLED": False}),
+    ("+ sparse", {"SPARSE_ENABLED": True, "RERANK_ENABLED": False}),
+    ("+ rerank", {"SPARSE_ENABLED": False, "RERANK_ENABLED": True}),
+    ("+ both (Phase 3)", {"SPARSE_ENABLED": True, "RERANK_ENABLED": True}),
+]
+
+
+async def ablate(Session, golden, user_id, chunks_by_document, *, k: int, min_similarity: float):
+    """Measure each Phase 3 addition in isolation.
+
+    This is the Phase 3 exit criterion: 'measurable recall@k and nDCG
+    improvement on a labelled set'. A single number from the final
+    configuration cannot meet it, because there is nothing to compare it to.
+    """
+    print(f"\n{'=' * 88}")
+    print(f"ABLATION — k={k}  min_similarity={min_similarity}  model={settings.EMBEDDING_MODEL}")
+    print("=" * 88)
+    header = (
+        f"{'configuration':<22} {'recall':>8} {'ndcg':>8} {'mrr':>8} "
+        f"{'prec':>8} {'misses':>7} {'abstain':>9}"
+    )
+    print(header)
+    print("-" * len(header))
+
+    rows = []
+    for label, flags in ABLATIONS:
+        with override(**flags):
+            scores, abstentions = await evaluate(
+                Session, golden, user_id, chunks_by_document,
+                k=k, min_similarity=min_similarity,
+            )
+        agg = aggregate(scores, k=k)
+        abstained = sum(1 for a in abstentions if a["abstained"])
+        rows.append(
+            {
+                "configuration": label,
+                **flags,
+                "recall": agg[f"recall@{k}"],
+                "ndcg": agg[f"ndcg@{k}"],
+                "mrr": agg["mrr"],
+                "precision": agg[f"precision@{k}"],
+                "misses": agg["total_misses"],
+                "abstained": abstained,
+                "abstain_total": len(abstentions),
+            }
+        )
+        print(
+            f"{label:<22} {agg[f'recall@{k}']:>8.3f} {agg[f'ndcg@{k}']:>8.3f} "
+            f"{agg['mrr']:>8.3f} {agg[f'precision@{k}']:>8.3f} "
+            f"{agg['total_misses']:>7d} {abstained:>5d}/{len(abstentions)}"
+        )
+
+    baseline, final = rows[0], rows[-1]
+    print(
+        f"\n  Phase 2 -> Phase 3:  recall {baseline['recall']:+.3f} -> "
+        f"{final['recall']:.3f} ({final['recall'] - baseline['recall']:+.3f})   "
+        f"nDCG {baseline['ndcg']:.3f} -> {final['ndcg']:.3f} "
+        f"({final['ndcg'] - baseline['ndcg']:+.3f})"
+    )
+    print(
+        "  A delta of 0.000 on every metric means the golden set still cannot "
+        "discriminate,\n  not that the change is neutral. Read the per-query "
+        "misses before concluding either."
+    )
+    return rows
+
+
+async def sweep_rerank(Session, golden, user_id, chunks_by_document, k: int, min_similarity: float):
+    """Calibrate RERANK_MIN_SCORE — the abstention dial Phase 5 could not find.
+
+    Phase 5's threshold sweep showed no cosine floor both preserves recall and
+    rejects unanswerable queries. The cross-encoder score is a different signal;
+    this sweep is the test of whether it separates them where cosine could not.
+    """
+    print(f"\n{'=' * 72}")
+    print("RERANK SCORE SWEEP — RERANK_MIN_SCORE")
+    print("=" * 72)
+    header = f"{'floor':>7} {'recall':>8} {'ndcg':>8} {'mrr':>8} {'misses':>7} {'abstain':>9}"
+    print(header)
+    print("-" * len(header))
+
+    rows = []
+    for floor in [0.0, 0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9]:
+        with override(SPARSE_ENABLED=True, RERANK_ENABLED=True, RERANK_MIN_SCORE=floor):
+            scores, abstentions = await evaluate(
+                Session, golden, user_id, chunks_by_document,
+                k=k, min_similarity=min_similarity,
+            )
+        agg = aggregate(scores, k=k)
+        abstained = sum(1 for a in abstentions if a["abstained"])
+        rows.append(
+            {
+                "rerank_min_score": floor,
+                "recall": agg[f"recall@{k}"],
+                "ndcg": agg[f"ndcg@{k}"],
+                "mrr": agg["mrr"],
+                "misses": agg["total_misses"],
+                "abstained": abstained,
+                "abstain_total": len(abstentions),
+            }
+        )
+        print(
+            f"{floor:>7.2f} {agg[f'recall@{k}']:>8.3f} {agg[f'ndcg@{k}']:>8.3f} "
+            f"{agg['mrr']:>8.3f} {agg['total_misses']:>7d} "
+            f"{abstained:>5d}/{len(abstentions)}"
+        )
+    return rows
+
+
 async def sweep_threshold(Session, golden, user_id, chunks_by_document, k: int):
     """Calibrate RETRIEVAL_MIN_SIMILARITY against the golden set.
 
@@ -245,6 +386,16 @@ async def main() -> int:
     parser.add_argument("--k", type=int, default=settings.RETRIEVAL_TOP_K)
     parser.add_argument("--min-similarity", type=float, default=settings.RETRIEVAL_MIN_SIMILARITY)
     parser.add_argument("--sweep-threshold", action="store_true")
+    parser.add_argument(
+        "--ablate",
+        action="store_true",
+        help="measure dense / +sparse / +rerank / both — the Phase 3 exit criterion",
+    )
+    parser.add_argument(
+        "--sweep-rerank",
+        action="store_true",
+        help="calibrate RERANK_MIN_SCORE, the abstention dial cosine could not provide",
+    )
     parser.add_argument("--golden-set", default="tests/test_eval/fixtures/golden_set.json")
     parser.add_argument("--json", dest="json_out", default=None)
     args = parser.parse_args()
@@ -277,6 +428,18 @@ async def main() -> int:
             k=args.k, min_similarity=args.min_similarity,
         )
         payload.update(print_report(scores, abstentions, args.k, args.min_similarity))
+
+        if args.ablate:
+            payload["ablation"] = await ablate(
+                Session, golden, user_id, chunks_by_document,
+                k=args.k, min_similarity=args.min_similarity,
+            )
+
+        if args.sweep_rerank:
+            payload["rerank_sweep"] = await sweep_rerank(
+                Session, golden, user_id, chunks_by_document,
+                args.k, args.min_similarity,
+            )
 
         if args.sweep_threshold:
             payload["sweep"] = await sweep_threshold(

@@ -20,6 +20,7 @@ import re
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import REGCONFIG
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chat_session import ChatSession
@@ -102,6 +103,105 @@ async def search_chunks(
                 document_id=chunk.document_id,
                 heading_path=chunk.heading_path,
                 metadata={"chunk_index": chunk.chunk_index},
+            )
+        )
+    return results
+
+
+async def search_chunks_sparse(
+    db: AsyncSession,
+    *,
+    query: str,
+    user_id: uuid.UUID,
+    limit: int = 25,
+    min_rank: float = 0.0,
+    ts_config: str | None = None,
+) -> list[RetrievedChunk]:
+    """Sparse (lexical) retrieval over the document corpus.
+
+    Dense retrieval has a specific, systematic blind spot: exact identifiers,
+    error codes, version tags, and rare proper nouns. A release tag like
+    `20260714-af` has no meaningful embedding neighbourhood — it either matches
+    literally or it does not — and those are exactly the "factual lookup"
+    queries the intent classifier routes here.
+
+    Ranking is `ts_rank_cd` with normalization flag 32 (`rank / (rank + 1)`),
+    which bounds the score into [0, 1). That is done for the trace's benefit,
+    not for fusion's: RRF consumes the rank, and a bounded score is merely
+    easier to read in a stage record than an unbounded one.
+
+    The query is turned into an OR of its lexemes, NOT an AND. This is the
+    difference between the arm working and the arm being decorative:
+    `websearch_to_tsquery` and `plainto_tsquery` both AND every term, so
+    "How often do log files rotate?" becomes `often & log & file & rotat` and
+    matches only a chunk containing all four. Measured against the golden
+    corpus, that returned ZERO rows for almost every query — the arm ran, cost
+    a round trip, and contributed nothing.
+
+    OR is also the right semantics for this arm's job. Sparse retrieval here
+    feeds a candidate pool that a cross-encoder then ranks, so its job is
+    recall: get the chunk containing the rare identifier into the pool.
+    Precision is the reranker's problem, and it is much better at it than a
+    term-conjunction is.
+
+    Each lexeme is `quote_literal`-wrapped before being handed back to
+    `to_tsquery` so that a hyphenated identifier is not re-parsed as a phrase
+    operator. Postgres does the lexing in both directions, so the query and the
+    indexed `content_tsv` agree by construction.
+    """
+    _require_user_id(user_id, "search_chunks_sparse")
+
+    from sqlalchemy import bindparam, func
+    from sqlalchemy import select as sa_select
+    from sqlalchemy.sql import literal_column
+
+    config = ts_config or "english"
+    if not query or not query.strip():
+        return []
+
+    # The config is bound rather than interpolated. It is settings-derived
+    # today, but an f-string here is one refactor away from being user-derived.
+    config_param = bindparam("ts_config", config, type_=REGCONFIG)
+
+    lexemes = func.unnest(
+        func.tsvector_to_array(func.to_tsvector(config_param, query))
+    ).alias("lex")
+    or_expression = (
+        sa_select(func.string_agg(func.quote_literal(literal_column("lex")), " | "))
+        .select_from(lexemes)
+        .scalar_subquery()
+    )
+    # A query of nothing but stopwords aggregates to NULL, `to_tsquery(NULL)`
+    # is NULL, and `content_tsv @@ NULL` matches nothing. Verified against
+    # PostgreSQL 16 — it is a clean empty result, not an error.
+    tsquery = func.to_tsquery(config_param, or_expression)
+    rank = func.ts_rank_cd(Chunk.content_tsv, tsquery, 32).label("rank")
+
+    stmt = (
+        select(Chunk, rank)
+        # Tenant filter on chunks.user_id directly — same rule as the dense arm.
+        .where(Chunk.user_id == user_id, Chunk.content_tsv.op("@@")(tsquery))
+        .order_by(rank.desc())
+        .limit(limit)
+    )
+
+    rows = (await db.execute(stmt)).all()
+
+    results: list[RetrievedChunk] = []
+    for chunk, raw_rank in rows:
+        score = float(raw_rank)
+        if score < min_rank:
+            continue
+        results.append(
+            RetrievedChunk(
+                text=chunk.text,
+                source="bm25",
+                rank=len(results) + 1,
+                score=score,
+                chunk_id=chunk.id,
+                document_id=chunk.document_id,
+                heading_path=chunk.heading_path,
+                metadata={"chunk_index": chunk.chunk_index, "ts_config": config},
             )
         )
     return results

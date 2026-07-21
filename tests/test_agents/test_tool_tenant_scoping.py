@@ -101,6 +101,13 @@ def test_search_chunks_rejects_missing_user_id():
         asyncio.run(search_chunks(None, query_embedding=[0.1], user_id=None))
 
 
+def test_search_chunks_sparse_rejects_missing_user_id():
+    from app.services.retrieval.sources import search_chunks_sparse
+
+    with pytest.raises(ValueError, match="user_id"):
+        asyncio.run(search_chunks_sparse(None, query="anything", user_id=None))
+
+
 def test_search_messages_rejects_missing_user_id():
     from app.services.retrieval.sources import search_messages
 
@@ -169,6 +176,88 @@ def test_chunk_query_filters_on_chunks_user_id_directly():
     assert "Document" not in source, (
         "search_chunks must not reach documents for the tenant filter"
     )
+
+
+def test_sparse_query_filters_on_chunks_user_id_directly():
+    """The Phase 3 sparse arm carries the same tenant rule as the dense one.
+
+    A new retrieval arm is a new place for the original cross-tenant defect to
+    reappear, and a GIN scan has no HNSW-style excuse to hide behind — an
+    unscoped `@@` match would simply return every tenant's chunks.
+    """
+    from app.services.retrieval import sources
+
+    source = inspect.getsource(sources.search_chunks_sparse)
+    assert "Chunk.user_id == user_id" in source
+    assert "Document" not in source
+
+
+def test_sparse_query_does_not_interpolate_the_ts_config_into_sql():
+    """The text-search config reaches Postgres as a bound parameter.
+
+    It is settings-derived rather than user-derived today, but an f-string here
+    is one refactor away from being a user-derived one.
+    """
+    from app.services.retrieval import sources
+
+    source = inspect.getsource(sources.search_chunks_sparse)
+    assert "bindparam" in source
+    assert 'f"' not in source.split("tsquery =")[-1].split("stmt =")[0]
+
+
+def _code_without_docstring(fn) -> str:
+    """Source of `fn` with its docstring removed.
+
+    These guards assert on what the code DOES. A docstring that explains why a
+    rejected alternative was rejected must not read as the code using it —
+    otherwise documenting a decision breaks the test that enforces it.
+    """
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    node = tree.body[0]
+    if (
+        node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    ):
+        node.body = node.body[1:]
+    return ast.unparse(tree)
+
+
+def test_sparse_arm_uses_or_semantics_not_and():
+    """The sparse arm must OR its terms, not AND them.
+
+    `websearch_to_tsquery` and `plainto_tsquery` both conjoin every term, so
+    "How often do log files rotate?" becomes `often & log & file & rotat` and
+    matches only a chunk containing all four. Measured against the golden
+    corpus that returned ZERO rows for almost every query: the arm ran, cost a
+    round trip, and contributed nothing to fusion. Restoring either function
+    here would silently make the arm decorative again.
+    """
+    from app.services.retrieval import sources
+
+    body = _code_without_docstring(sources.search_chunks_sparse)
+    assert "websearch_to_tsquery" not in body
+    assert "plainto_tsquery" not in body
+    assert "tsvector_to_array" in body
+    # ast.unparse normalizes string quoting, so match on the separator itself.
+    assert "string_agg" in body
+    assert " | " in body, "lexemes must be joined with the tsquery OR operator"
+
+
+def test_sparse_arm_quotes_lexemes_before_reparsing():
+    """Each lexeme is `quote_literal`-wrapped on the way back into to_tsquery.
+
+    Without it a hyphenated identifier such as `20260714-af` is re-parsed as a
+    phrase expression rather than matched as a lexeme.
+    """
+    from app.services.retrieval import sources
+
+    source = inspect.getsource(sources.search_chunks_sparse)
+    assert "quote_literal" in source
 
 
 # ── Legacy service-level guards, still enforced ─────────────

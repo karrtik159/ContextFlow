@@ -272,6 +272,126 @@ Deviations and findings:
 - **Exit criteria:** a knowledge query completes with 1 LLM call (synthesis) instead of 7–15; every stage appears in the trace; `routed_to` values preserved.
 
 ### Phase 3 — Rerank + rewrite
+
+**Status: DONE.** Tests 269→355 passed / 1 skipped; ruff held at 73. No
+migration — the sparse arm rides entirely on the GIN index Phase 1 already
+created (`alembic check`: no new upgrade operations). Measured against real
+pgvector with `all-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, no API spend.
+
+**Measured, k=3, 16 documents / 52 chunks, 43 answerable queries, floor 0.25:**
+
+| configuration        | recall@3 | nDCG@3 | MRR   | prec@3 | misses |
+|----------------------|----------|--------|-------|--------|--------|
+| dense only (Phase 2) | 0.988    | 0.974  | 0.977 | 0.364  | 0      |
+| + sparse             | 0.988    | 0.943  | 0.938 | 0.364  | 0      |
+| + rerank             | 1.000    | 0.982  | 0.977 | 0.372  | 0      |
+| **+ both (Phase 3)** | **1.000**| **0.982**| 0.977| 0.372  | 0      |
+
+The exit criterion is met, but the honest reading is that the margin is small
+and the ablation matters more than the headline. Three findings:
+
+**Finding 1 — the sparse arm is only safe downstream of the reranker.**
+On its own it *costs* nDCG (0.974 → 0.943): OR-semantics injects loosely-related
+chunks that fusion cannot discriminate. Its value is recall into the candidate
+pool, which the cross-encoder then sorts out. Enabling `SPARSE_ENABLED` with
+`RERANK_ENABLED=False` is a measured regression, not a partial improvement.
+
+**Finding 2 — the cross-encoder does NOT solve abstention.** Phase 5 concluded
+that no cosine floor both preserves recall and rejects topically-near
+unanswerable queries, and predicted the reranker would supply that signal
+because it scores relevance directly. It does not. Abstention is still **0/5**,
+and the unanswerable "Which OIDC claims does Meridian map to workspace roles?"
+scored **0.992** — higher than most genuinely correct answers. A cross-encoder
+scores *aboutness*, and an unanswerable question about a documented subject is
+maximally about it.
+
+The `--sweep-rerank` calibration confirms there is no usable operating point:
+
+| RERANK_MIN_SCORE | recall@3 | nDCG@3 | MRR   | misses | abstain |
+|------------------|----------|--------|-------|--------|---------|
+| 0.00             | 1.000    | 0.982  | 0.977 | 0      | 0/5     |
+| 0.01             | 0.988    | 0.975  | 0.977 | 0      | 1/5     |
+| 0.05             | 0.977    | 0.961  | 0.953 | 1      | 1/5     |
+| 0.10             | 0.953    | 0.938  | 0.930 | 2      | 1/5     |
+| 0.20             | 0.907    | 0.891  | 0.884 | 4      | 1/5     |
+| 0.30             | 0.884    | 0.868  | 0.860 | 5      | 1/5     |
+| 0.50             | 0.860    | 0.845  | 0.837 | 6      | 1/5     |
+| 0.70             | 0.860    | 0.845  | 0.837 | 6      | 1/5     |
+
+Abstention buys exactly **one** of five unanswerable queries, at 0.01, and then
+never improves no matter how much recall is spent — by 0.30 recall has fallen
+to 0.884 with five queries retrieving nothing relevant, still abstaining on
+only that same one. The cross-encoder is not a weak abstention signal; it is
+close to a non-signal. `RERANK_MIN_SCORE` therefore ships at **0.0 (floor
+disabled)**, which is the correct default rather than a cautious one: every
+non-zero value measured is a strict loss.
+
+**Abstention needs a different mechanism, and the literature names it.** Google
+/ UC San Diego, *Sufficient Context: A New Lens on RAG Systems* (ICLR 2025,
+arXiv 2411.06037), draws exactly the distinction this measurement ran into:
+context is **sufficient** if it contains all the information needed for a
+definitive answer, and sufficiency is not relevance — context can be maximally
+relevant and still insufficient. They also report the failure mode seen here:
+RAG *reduces* a model's willingness to abstain. Their autorater (prompted LLM,
+binary sufficient/insufficient over query + retrieved chunks, run BEFORE
+generation so it works as a filter rather than a post-hoc audit) reaches ~93%
+against human expert labels, and pairing it with self-rated confidence improves
+selective accuracy by up to 10 points over confidence alone. A local
+entailment/NLI classifier (TRUE-NLI style; Vectara HHEM-2.1-Open is a
+`flan-t5-base` cross-encoder that loads through the same `sentence_transformers`
+CrossEncoder path as the reranker) is the cheaper approximation, reported
+slightly below the LLM autorater. This is Phase 4 work — see §Phase 4.
+
+**Finding 3 — three stages read as working while doing nothing.** Each was
+caught only by measurement, and each looked correct in review:
+- The **sparse arm returned zero rows on almost every query.**
+  `websearch_to_tsquery` (and `plainto_tsquery`) AND every term, so "How often
+  do log files rotate?" became `often & log & file & rotat`. The arm ran, cost
+  a round trip, and contributed nothing — visible only because `+ sparse`
+  scored *identical to three decimals* to dense-only. Now ORs lexemes.
+- The **reranker made retrieval worse** (recall 0.988 → 0.953) because it
+  scored chunk text *without its heading path*. "Synchronisation runs every
+  four hours…" never says "directory", so the model read it as a strong answer
+  to "How often are encryption keys rotated?". `build_context_block` already
+  showed the heading path to the synthesis model; scoring on less context than
+  the reader gets is a plain mismatch.
+- **Identifier phrase-quoting was a no-op.** `build_sparse_query` wrapped
+  identifiers in double quotes for `websearch_to_tsquery` — reasoning that
+  stopped applying once the consumer changed. `to_tsvector` is a *document*
+  parser: quotes are punctuation, and `tsvector_to_array` de-duplicates the
+  appended copy. Verified the executed tsquery is byte-identical with and
+  without it. Removed.
+
+**Two defects fixed that predate this phase:**
+- **Concurrent `AsyncSession` use.** Phase 2's fan-out ran the dense and
+  message arms in one `asyncio.gather` over a shared session. SQLAlchemy
+  rejects this (`InvalidRequestError: concurrent operations are not
+  permitted`, verified against the installed version); Phase 3 would have made
+  it three arms. DB arms now run serially, with Neo4j and Mem0 — the arms
+  actually worth overlapping — still concurrent with the whole group.
+- **Transaction poisoning.** PostgreSQL aborts the transaction on any
+  statement error, so one failing arm made every subsequent arm fail with
+  `InFailedSQLTransactionError`. Because `_run_arm` swallows arm failures, the
+  cascade was silent: the trace showed several independent "arm failed"
+  entries whose stated causes were all the same downstream symptom. Each DB arm
+  now runs in a `SAVEPOINT`, which clears the error without discarding work the
+  request did earlier. (The transaction did *not* go on to fail the request's
+  final `commit()` — tested.)
+
+**Golden set expanded 6 → 16 documents, 18 → 48 queries** to satisfy Phase 5's
+Finding 2. The additions are near-miss distractors, not more subject matter:
+four documents now describe a "rotation" (token, encryption key, on-call shift,
+log file); "retained for N" appears with six different values of N; quota (a
+limit at rest) and rate limit (a limit on speed) each explicitly disclaim the
+other; a CLI error-code reference supplies identifier queries the dense arm is
+structurally bad at.
+
+**Not verified:** `RERANK_MIN_SCORE` calibration (`--sweep-rerank`), HyDE and
+multi-query (implemented, flag-gated **off**, never measured — they cost an LLM
+call each and must earn it against the golden set before being enabled), and
+the reranker's behaviour with `text-embedding-3-small`, whose candidate pool
+differs from MiniLM's.
+
 - Cross-encoder reranker (`BAAI/bge-reranker-base`, ~30 ms for 25 pairs on CPU) behind the same lazy thread-safe singleton pattern as the SentenceTransformer encoder — **must not connect or load at import time** (`test_graph_search_import_does_not_connect` enforces this discipline).
 - Retrieve wide (k≈25), rerank to 5. Today k=5 *is* the final context, so a relevant chunk ranked 6th is unrecoverable.
 - Hybrid sparse retrieval via `ts_rank_cd` over `content_tsv`. Dense-only retrieval fails on exact identifiers, error codes, and rare proper nouns — precisely the "factual lookup" queries the classifier routes here.

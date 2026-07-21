@@ -27,10 +27,13 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.services.retrieval.contracts import RetrievedChunk, RetrievalTrace, StageRecord
+from app.services.retrieval.contracts import RetrievalTrace, RetrievedChunk, StageRecord
 from app.services.retrieval.fusion import assign_citation_labels, reciprocal_rank_fusion
+from app.services.retrieval.rerank import rerank_fused
+from app.services.retrieval.rewrite import rewrite_query
 from app.services.retrieval.sources import (
     search_chunks,
+    search_chunks_sparse,
     search_graph,
     search_memory,
     search_messages,
@@ -77,6 +80,68 @@ async def _run_arm(
         logger.warning("Retrieval arm '%s' failed: %s", name, exc, exc_info=True)
         items, error = [], f"{type(exc).__name__}: {exc}"
     return name, items, int((time.perf_counter() - t0) * 1000), error
+
+
+ArmResult = tuple[str, list[RetrievedChunk], int, str | None]
+
+
+async def _run_db_arm(
+    db: AsyncSession,
+    name: str,
+    coro_factory: Callable[[], Awaitable[list[RetrievedChunk]]],
+) -> ArmResult:
+    """Run one PostgreSQL arm inside a SAVEPOINT.
+
+    The savepoint is what keeps one arm's failure from becoming every
+    subsequent arm's failure. PostgreSQL aborts the whole transaction on any
+    statement error, so once `search_chunks` fails — a dimension mismatch is
+    the documented live risk (CLAUDE.md: EMBEDDING_DIMENSIONS is load-bearing
+    in three places) — every later statement on that session raises
+    `InFailedSQLTransactionError` instead of doing its job.
+
+    Because `_run_arm` deliberately swallows arm failures, that cascade is
+    silent: the trace records three independent "arm failed" entries whose
+    stated causes are all the same downstream symptom, and the real error
+    appears only in the first one. Verified against PostgreSQL 16 — a failed
+    statement does poison the next, and rolling back to a savepoint restores
+    the session while preserving work the request did before retrieval.
+
+    A plain `db.rollback()` would also clear the error, but it would discard
+    that earlier work; the caller owns this session and its transaction.
+    """
+    try:
+        async with db.begin_nested():
+            return await _run_arm(name, coro_factory)
+    except Exception as exc:  # pragma: no cover - savepoint teardown only
+        logger.warning("Savepoint teardown failed for arm '%s': %s", name, exc)
+        return name, [], 0, f"{type(exc).__name__}: {exc}"
+
+
+async def _run_db_arms_serially(
+    db: AsyncSession,
+    arms: list[tuple[str, Callable[[], Awaitable[list[RetrievedChunk]]]]],
+) -> list[ArmResult]:
+    """Run the PostgreSQL-backed arms one at a time on the shared session.
+
+    A single `AsyncSession` CANNOT be used concurrently. SQLAlchemy detects it
+    and raises `InvalidRequestError: This session is provisioning a new
+    connection; concurrent operations are not permitted` — verified against the
+    installed version, not assumed. The Phase 2 fan-out put the dense corpus arm
+    and the message arm in the same `asyncio.gather`, which is that pattern; it
+    survived review because the arms are short and the failure needs them to
+    actually overlap in the event loop.
+
+    Serializing here rather than opening a session per arm is deliberate. The
+    caller owns the session and its transaction — the retrieval arms must read
+    the same snapshot the request is already in, and spawning sessions from a
+    function that was handed one would silently double the connection use per
+    request under the pool the caller sized.
+
+    Little wall-clock is lost: these are index lookups against the same
+    connection, and the arms worth overlapping (Neo4j, Mem0) are the network
+    ones, which still run concurrently with this whole group.
+    """
+    return [await _run_db_arm(db, name, factory) for name, factory in arms]
 
 
 async def run_retrieval(
@@ -129,11 +194,53 @@ async def run_retrieval(
         trace.total_latency_ms = int((time.perf_counter() - started) * 1000)
         return trace
 
+    # ── Rewrite ─────────────────────────────────────────────
+    # Deterministic by default and free. HyDE / multi-query cost an LLM call
+    # each and are flag-gated off, so the default path still makes exactly one
+    # LLM call per knowledge query (synthesis), as Phase 2 established.
+    with _Timer() as rewrite_timer:
+        rewritten = await rewrite_query(retrieval_query)
+    if rewritten.dense_query != retrieval_query or rewritten.methods:
+        trace.rewritten_query = rewritten.dense_query
+    trace.record(
+        StageRecord(
+            name="rewrite",
+            latency_ms=rewrite_timer.ms,
+            input_summary=retrieval_query[:200],
+            output_summary=(
+                f"sparse={rewritten.sparse_query[:120]!r} "
+                f"identifiers={rewritten.identifiers}"
+            ),
+            metadata={
+                "methods": rewritten.methods,
+                "identifiers": rewritten.identifiers,
+                "variants": rewritten.variants,
+                "hyde": bool(rewritten.hyde_document),
+            },
+        )
+    )
+
+    # Extra dense probes (HyDE / multi-query) need their own embeddings. The
+    # caller's embedding is always reused for the primary query — this only
+    # embeds text the caller could not have known about.
+    extra_embeddings: list[tuple[str, list[float]]] = []
+    extra_texts = rewritten.dense_queries[1:]
+    if extra_texts:
+        from app.services.embeddings import embed_text_async_safe
+
+        for index, text in enumerate(extra_texts):
+            vector = await embed_text_async_safe(text)
+            if vector:
+                extra_embeddings.append((f"vector:rewrite{index + 1}", vector))
+
     # ── Fan out ─────────────────────────────────────────────
     candidates = settings.RETRIEVAL_CANDIDATES_PER_SOURCE
     with _Timer() as fanout_timer:
-        arm_results = await asyncio.gather(
-            _run_arm(
+        # PostgreSQL arms share the caller's session and therefore run in
+        # sequence — see _run_db_arms_serially for why concurrency here is not
+        # merely slower but an error.
+        db_arms: list[tuple[str, Callable[[], Awaitable[list[RetrievedChunk]]]]] = [
+            (
                 "vector",
                 lambda: search_chunks(
                     db,
@@ -143,7 +250,7 @@ async def run_retrieval(
                     min_similarity=settings.RETRIEVAL_MIN_SIMILARITY,
                 ),
             ),
-            _run_arm(
+            (
                 "messages",
                 lambda: search_messages(
                     db,
@@ -153,9 +260,50 @@ async def run_retrieval(
                     min_similarity=settings.RETRIEVAL_MIN_SIMILARITY,
                 ),
             ),
+        ]
+
+        if settings.SPARSE_ENABLED:
+            db_arms.append(
+                (
+                    "bm25",
+                    lambda: search_chunks_sparse(
+                        db,
+                        query=rewritten.sparse_query,
+                        user_id=scoped_uuid,
+                        limit=settings.SPARSE_CANDIDATES,
+                        min_rank=settings.SPARSE_MIN_RANK,
+                        ts_config=settings.SPARSE_TS_CONFIG,
+                    ),
+                )
+            )
+
+        # Each extra dense probe is its own ranked list, so a chunk that all
+        # three rewrites agree on gains RRF weight from that agreement. That is
+        # the point of multi-query; it is also why these are flag-gated —
+        # unearned agreement is just the vector arm voting three times.
+        for arm_name, vector in extra_embeddings:
+            db_arms.append(
+                (
+                    arm_name,
+                    lambda v=vector: search_chunks(
+                        db,
+                        query_embedding=v,
+                        user_id=scoped_uuid,
+                        limit=candidates,
+                        min_similarity=settings.RETRIEVAL_MIN_SIMILARITY,
+                    ),
+                )
+            )
+
+        # The external arms hold no PostgreSQL session, so they overlap freely
+        # with the whole DB group — which is where the concurrency was actually
+        # worth having, since Neo4j and Mem0 are the network-latency arms.
+        db_results, *external_results = await asyncio.gather(
+            _run_db_arms_serially(db, db_arms),
             _run_arm("graph", lambda: search_graph(query=retrieval_query, user_id=user_id)),
             _run_arm("memory", lambda: search_memory(query=retrieval_query, user_id=user_id)),
         )
+        arm_results = [*db_results, *external_results]
 
     ranked_lists: list[list[RetrievedChunk]] = []
     for name, items, latency_ms, error in arm_results:
@@ -178,7 +326,7 @@ async def run_retrieval(
         StageRecord(
             name="retrieve:fanout",
             latency_ms=fanout_timer.ms,
-            input_summary=f"{len(ranked_lists)} arms, concurrent",
+            input_summary=f"{len(ranked_lists)} arms (db serial, external concurrent)",
             output_summary=f"{sum(len(r) for r in ranked_lists)} total candidates",
             metadata={
                 "arms": [name for name, *_ in arm_results],
@@ -211,22 +359,58 @@ async def run_retrieval(
         )
     )
 
+    # ── Rerank ──────────────────────────────────────────────
+    # The stage that makes "retrieve wide" pay off. Fusion orders by rank
+    # agreement between arms, which is a proxy; the cross-encoder reads the
+    # query and the chunk together and scores relevance directly.
+    # The reason is set from the actual condition rather than defaulted, so the
+    # persisted trace distinguishes "reranking is switched off" from "there was
+    # nothing to rerank" — two very different things to read in an incident.
+    rerank_meta: dict = {
+        "ran": False,
+        "reason": "disabled" if not settings.RERANK_ENABLED else "no candidates",
+    }
+    ordered = fused
+    with _Timer() as rerank_timer:
+        if settings.RERANK_ENABLED and fused:
+            ordered, rerank_meta = await rerank_fused(
+                retrieval_query,
+                fused,
+                candidates=settings.RERANK_CANDIDATES,
+                min_score=settings.RERANK_MIN_SCORE,
+            )
+    trace.record(
+        StageRecord(
+            name="rerank",
+            latency_ms=rerank_timer.ms,
+            input_summary=f"{len(fused)} fused, top {settings.RERANK_CANDIDATES} scored",
+            output_summary=(
+                f"{rerank_meta.get('positions_changed', 0)} positions changed"
+                if rerank_meta.get("ran")
+                else f"skipped: {rerank_meta.get('reason')}"
+            ),
+            metadata={"model": settings.RERANK_MODEL, **rerank_meta},
+        )
+    )
+
     # ── Threshold + truncate ────────────────────────────────
     with _Timer() as cut_timer:
-        selected = fused[:top_k]
+        selected = ordered[:top_k]
         final = assign_citation_labels(selected)
     trace.final_chunks = final
     trace.record(
         StageRecord(
             name="threshold",
             latency_ms=cut_timer.ms,
-            input_summary=f"{len(fused)} fused",
+            input_summary=f"{len(ordered)} candidates after rerank",
             output_summary=(
                 f"{len(final)} selected" if final else "no context cleared the relevance floor"
             ),
             metadata={
                 "top_k": top_k,
                 "min_similarity": settings.RETRIEVAL_MIN_SIMILARITY,
+                "rerank_min_score": settings.RERANK_MIN_SCORE,
+                "reranked": rerank_meta.get("ran", False),
                 "empty": not final,
             },
         )

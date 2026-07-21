@@ -11,13 +11,31 @@
     "Relevance is labelled by (document, marker substring) rather than by chunk",
     "id, because chunk ids are assigned at ingest and chunk boundaries move",
     "whenever the chunker changes. A chunk counts as relevant when it belongs to",
-    "the named document AND contains the marker, case-insensitively. This keeps",
-    "the labels valid across Phase 3's chunking and reranking changes.",
+    "the named document AND contains the marker, case-insensitively.",
     "",
-    "Distractors are intentional: several documents mention overlapping terms",
-    "(retention, limits, tokens) so that a query has plausible-but-wrong",
-    "candidates to be confused by. A golden set with no distractors reports high",
-    "recall for any retriever."
+    "PHASE 3 EXPANSION. Phase 5 measured MRR 1.000 at every k on the original",
+    "six-document corpus and concluded it was too easy to discriminate between",
+    "retrieval strategies: it would catch a regression but could never show that",
+    "a reranker helps. The ten documents added here are built as NEAR-MISS",
+    "DISTRACTORS rather than as more subject matter:",
+    "",
+    "  - Four documents now describe a 'rotation' (workspace token, encryption",
+    "    key, on-call shift, log file). They share almost all surface vocabulary",
+    "    and answer completely different questions.",
+    "  - 'retained for N' appears with six different values of N across six",
+    "    documents (14 days, 30 days, 90 days, 180 days, 400 days, 1 year,",
+    "    7 years). Retrieving the right retention window now requires reading",
+    "    the query, not matching the phrase.",
+    "  - Quota (a limit at rest) and rate limit (a limit on speed) are separate",
+    "    documents that each explicitly disclaim the other.",
+    "  - Support response targets and incident severities are separate documents",
+    "    that both discuss urgency and both use the word 'severity'.",
+    "  - A CLI error-code reference supplies identifier queries (E1042, E4021),",
+    "    which dense retrieval is structurally bad at and the sparse arm exists",
+    "    for.",
+    "",
+    "This is what makes 'measurable recall@k and nDCG improvement' a real exit",
+    "criterion rather than a formality on a set that already scores 1.000."
   ],
   "documents": [
     {
@@ -49,99 +67,225 @@
       "key": "incidents",
       "title": "Meridian Incident Response",
       "text": "# Meridian Incident Response\n\n## Severity Levels\n\nMeridian classifies incidents into three severities. A severity one incident is a full outage or a confirmed data exposure and pages the on call engineer immediately. A severity two incident is a partial degradation affecting more than ten percent of requests and pages during business hours only. A severity three incident is a defect with a workaround and is triaged on the next working day.\n\nSeverity is set by the first responder and can be raised by anyone, but can only be lowered by the incident commander, so that pressure to close an incident cannot quietly downgrade it.\n\n## Declaring an Incident\n\nAn incident is declared with the meridian incident declare command, which opens a channel, pages according to severity, and starts the timeline. The timeline is append only. Every subsequent status update is recorded against it, and the timeline becomes the basis of the review.\n\n## Review\n\nEvery severity one and severity two incident gets a written review within five working days. The review is blameless and focuses on the conditions that allowed the failure rather than on the person who triggered it. A review that identifies no action items is acceptable and is sometimes the correct outcome, but it must say so explicitly rather than leaving the section empty."
+    },
+    {
+      "key": "keyrotation",
+      "title": "Meridian Encryption Key Rotation",
+      "text": "# Meridian Encryption Key Rotation\n\n## Rotation Schedule\n\nMeridian rotates the data encryption key for each workspace every ninety days. Rotation is automatic and requires no action from an account owner. A rotation event re-encrypts the workspace key envelope under the new key version; it does not re-encrypt stored objects, which continue to reference the key version they were written under.\n\nKey rotation is entirely separate from credential rotation. Rotating an encryption key does not invalidate any token, and rotating a token does not trigger a key rotation. Conflating the two is the most common source of confusion in support requests.\n\n## Manual Rotation\n\nAn account owner on the Anchored plan may force an out of cycle key rotation from the security console. A forced rotation is rate limited to one per workspace per twenty four hours, because each rotation writes a new key envelope for every object prefix in the workspace.\n\nForced rotation does not cause downtime and does not interrupt in-flight requests. Old key versions are retained for one hundred and eighty days so that objects written under them remain readable, after which any object still referencing an expired key version is re-wrapped by a background job.\n\n## Compromise\n\nIf a key version is believed to be compromised, open a severity one incident rather than using the self service rotation. A compromise response revokes the key version immediately instead of retaining it, which requires the re-wrap job to complete before the affected objects are readable again. That job takes roughly four hours per terabyte."
+    },
+    {
+      "key": "oncall",
+      "title": "Meridian On-Call Rotation",
+      "text": "# Meridian On-Call Rotation\n\n## Schedule\n\nThe Meridian on call rotation runs weekly and hands over on Wednesday at ten hundred local time. Each rotation has a primary and a secondary responder. The secondary is paged only when the primary does not acknowledge within five minutes.\n\nA responder may swap a shift with another responder without approval, provided the swap is recorded before the handover. Unrecorded swaps are the most common cause of an unacknowledged page, because the paging system routes on the recorded schedule rather than on the intended one.\n\n## Paging\n\nPaging is driven by incident severity and not by the on call schedule itself. A severity one incident pages the primary immediately at any hour. A severity two incident pages during business hours in the responder's local timezone. A severity three incident never pages and appears in the next working day triage queue.\n\nIf neither primary nor secondary acknowledges within fifteen minutes, the page escalates to the engineering manager on the escalation list. Escalation is logged against the incident timeline.\n\n## Handover\n\nEvery handover produces a written note listing open incidents, suppressed alerts, and any deploy freeze in effect. A deploy freeze declared during a shift survives the handover and must be lifted explicitly; it does not expire when the shift ends."
+    },
+    {
+      "key": "support",
+      "title": "Meridian Support Tiers and Response Times",
+      "text": "# Meridian Support Tiers and Response Times\n\n## Tiers\n\nMeridian offers three support tiers. Standard support is included with the Starter and Team plans. Priority support is available as an add on to the Team plan. Anchored support is included with the Anchored plan and carries the pinned release channel.\n\n## Response Targets\n\nA support response target is the time to a first human response, not the time to resolution. Standard support targets one business day for all requests. Priority support targets four business hours for urgent requests and one business day otherwise. Anchored support targets one hour for urgent requests, at any hour, and four business hours otherwise.\n\nA support response target is not an incident severity. Severity classifies the impact of a production failure and drives paging; a support target describes how quickly a written request is answered. A severity two incident and an urgent support request are unrelated things that happen to both feel urgent.\n\n## Escalation\n\nA support request that misses its response target is escalated automatically to the support lead. An account owner may also escalate a request manually once per request. Manual escalation does not reset the response target clock, which continues to run from the original request time.\n\n## Exclusions\n\nSupport targets do not apply to feature requests, to requests about code the customer wrote against the API, or to requests submitted through the community forum rather than the support console."
+    },
+    {
+      "key": "quotas",
+      "title": "Meridian Workspace Quotas",
+      "text": "# Meridian Workspace Quotas\n\n## Quota Types\n\nA quota limits how much of a resource a workspace may hold at rest. This is different from a rate limit, which limits how fast requests may be made. Exceeding a quota blocks the write that would exceed it; exceeding a rate limit delays requests but never rejects stored data.\n\nEach workspace has a storage quota of five hundred gigabytes, a document quota of two million documents, and an attachment size limit of one hundred megabytes per file.\n\n## Exceeding a Quota\n\nA write that would exceed a storage or document quota is rejected with a quota exceeded response, and the workspace enters a read only state for writes of that resource type. Reads, exports, and deletions continue to work, because a workspace that cannot delete data cannot recover from a full quota.\n\nQuota state is evaluated at write time rather than continuously, so a workspace that drops below its quota through deletion becomes writable again on the next write attempt without any manual reset.\n\n## Increases\n\nQuota increases are requested through the support console and are reviewed rather than granted automatically, because storage quota is backed by provisioned capacity. Rate limit increases follow a different process and are described in the rate limit documentation.\n\nQuota increases are not available on the Starter plan. A Starter workspace at its quota must either delete data or move to the Team plan."
+    },
+    {
+      "key": "migrations",
+      "title": "Meridian Database Migrations",
+      "text": "# Meridian Database Migrations\n\n## Forward Migrations\n\nA Meridian migration is identified by a migration id, which is a four digit sequence followed by a short slug, for example 0142-add-workspace-index. Migration ids are allocated at merge time and are never reused.\n\nMigrations run before the application release that depends on them, in a separate step, so that a migration failure does not leave a half deployed release. The migration console reports each migration as pending, applied, or failed.\n\n## Inverse Migrations\n\nEvery migration must ship with an inverse migration, but an inverse is not applied automatically during a rollback. Application rollback and migration rollback are separate operations on purpose: reverting a schema change under live traffic is far riskier than reverting an application image, and doing it automatically would make a routine rollback a data risk.\n\nTo revert a schema change, roll the application back first, confirm it is healthy, and then apply the inverse migration from the migration console. Applying an inverse while the newer application version is still serving traffic will cause write failures.\n\n## Forward Incompatible Migrations\n\nA migration is forward incompatible when the previous application version cannot run against the new schema. Forward incompatible migrations must be split into an expand step and a contract step released at least one version apart, so that a rollback target always exists.\n\nA migration that has been applied for more than fourteen days cannot be inverted from the console, because the fourteen day artifact window means the application version that preceded it may no longer be deployable."
+    },
+    {
+      "key": "storage",
+      "title": "Meridian Artifact and Object Storage",
+      "text": "# Meridian Artifact and Object Storage\n\n## Build Artifacts\n\nBuild artifacts are container images produced by the release pipeline and stored in the artifact registry. An artifact is retained in the registry for fourteen days, after which it is garbage collected. This fourteen day window is what makes a rollback older than fourteen days fail with a registry miss.\n\nGarbage collected artifacts are not lost. They are moved to cold storage and are retained there for one year. Restoring an artifact from cold storage takes roughly eight minutes and is done with the artifact restore command.\n\n## Workspace Objects\n\nWorkspace objects are customer content and follow the data retention policy rather than the artifact policy. They are not garbage collected on the fourteen day cycle, and the two windows are unrelated despite both being described as retention.\n\n## Backups\n\nBackups of the primary database are taken hourly and are retained on a ninety day cycle. A backup is a point in time copy and cannot be restored into a running cluster; restoring one provisions a new cluster and then cuts over, which takes approximately forty minutes.\n\nBackups are encrypted under the account key version current at the time the backup was written, so restoring a backup older than the key retention window requires the key restore procedure first."
+    },
+    {
+      "key": "scim",
+      "title": "Meridian Directory Provisioning",
+      "text": "# Meridian Directory Provisioning\n\n## Provisioning Model\n\nMeridian synchronises user accounts from an external directory using directory provisioning. Provisioning creates, updates, and deactivates Meridian accounts to match the directory; it does not handle sign in. Authentication remains the responsibility of Meridian's own token system.\n\nA provisioned account cannot change its own email address or display name in Meridian, because the next synchronisation would overwrite the change. Attempting to do so returns a directory managed response.\n\n## Synchronisation\n\nSynchronisation runs every four hours, and an account owner may trigger it manually once per hour. A synchronisation that would deactivate more than ten percent of accounts in a single run is halted and flagged for confirmation, because that pattern usually indicates a misconfigured directory filter rather than a genuine bulk departure.\n\nDeactivation through provisioning revokes session tokens immediately. It does not revoke workspace tokens or service tokens, which are account scoped rather than user scoped and must be revoked separately.\n\n## Group Mapping\n\nDirectory groups map to Meridian workspace roles through an explicit mapping table. Unmapped groups are ignored rather than defaulting to a role, so that adding a group in the directory never silently grants access in Meridian."
+    },
+    {
+      "key": "cli",
+      "title": "Meridian CLI Error Reference",
+      "text": "# Meridian CLI Error Reference\n\n## Error Codes\n\nThe Meridian CLI reports failures with a stable error code. Error codes are never reused, and a code retired from the CLI is left documented rather than removed.\n\nError E1042 means the release tag was not found in the artifact registry. It is most often produced by a rollback to a tag older than the fourteen day artifact window, and is resolved by restoring the artifact from cold storage first.\n\nError E2071 means the migration console refused an inverse migration because the migration is older than fourteen days.\n\nError E3310 means the supplied token does not carry the scope required by the command. This is a scope failure and not an expiry failure; an expired token reports E3311 instead.\n\nError E4021 means a write was rejected because the workspace is at its storage quota. It is not a rate limit error; rate limiting reports E4200 with a retry after value.\n\n## Exit Codes\n\nThe CLI exits zero on success, one on a user error such as a bad argument, two on an authentication or scope failure, and three on a server error. A rate limited request exits three rather than one, because it is a transient server side condition rather than a mistake by the caller.\n\n## Diagnostics\n\nThe meridian diagnose command collects the CLI version, the resolved account and workspace, the last ten requests with their error codes, and the local clock skew. Clock skew above sixty seconds is reported prominently, because token validation failures caused by skew otherwise look like scope failures."
+    },
+    {
+      "key": "webhooks",
+      "title": "Meridian Webhooks",
+      "text": "# Meridian Webhooks\n\n## Delivery\n\nA Meridian webhook delivers an event to a customer endpoint over HTTPS. Delivery is at least once, not exactly once, so an endpoint must be idempotent. Each delivery carries an event id that is stable across retries, which is what an endpoint should deduplicate on.\n\nA delivery is considered successful when the endpoint returns any two hundred level response within ten seconds. A slower response is treated as a failure even if it eventually arrives.\n\n## Retries\n\nA failed delivery is retried with exponential backoff at one minute, five minutes, thirty minutes, two hours, and finally six hours. After the fifth failed attempt the delivery is dropped and the endpoint is marked degraded.\n\nWebhook retries are unrelated to API rate limiting. A rate limited API caller is told to retry with a retry after header; a failed webhook delivery is retried by Meridian on the schedule above without any action from the customer.\n\nAn endpoint that is marked degraded for more than seven consecutive days is disabled, and the account owner is notified. A disabled endpoint must be re-enabled manually, and re-enabling does not replay the dropped deliveries.\n\n## Signing\n\nEvery delivery is signed with a webhook signing secret, which is distinct from any token type. The signing secret is displayed once at creation and can be rotated with an overlap period of twenty four hours, during which both the old and new signatures are accepted."
+    },
+    {
+      "key": "observability",
+      "title": "Meridian Logs and Metrics",
+      "text": "# Meridian Logs and Metrics\n\n## Log Streams\n\nMeridian exposes three log streams. The request log records one entry per API request with the token type, the workspace, and the response status. The audit log records administrative actions such as token creation, role changes, and deletion requests. The application log records internal diagnostics and is not customer visible.\n\nThe request log is retained for thirty days, matching the application log window. The audit log is retained for four hundred days, because it is the record used for compliance review.\n\n## Log Rotation\n\nLog files rotate hourly on the collector and are compressed after rotation. Log rotation is a storage mechanism and has nothing to do with token rotation or encryption key rotation, despite the shared word; the three are frequently confused in support requests.\n\n## Metrics\n\nMetrics are emitted at one minute resolution and are downsampled to five minute resolution after seven days and to one hour resolution after ninety days. Downsampled metrics keep minimum, maximum, and average, so a spike remains visible after downsampling even though its exact shape does not.\n\n## Alerts\n\nAn alert fires against a metric threshold sustained over a window rather than against a single sample, because one minute resolution makes single sample alerts unusably noisy. An alert that fires during a declared deploy freeze is still delivered but is tagged with the freeze, so that a reviewer can tell an expected alert from an unexpected one."
     }
   ],
   "queries": [
     {
       "id": "q_rollback_basic",
       "query": "How do I roll back a bad deploy in Meridian?",
-      "relevant": [{"document": "deployment", "contains": "rollback command restores"}],
+      "relevant": [
+        {
+          "document": "deployment",
+          "contains": "rollback command restores"
+        }
+      ],
       "reference": "Run the meridian rollback command with the previous release tag. It restores the previous container image, drains in-flight connections over thirty seconds, and swaps the routing table. It does not revert database migrations."
     },
     {
       "id": "q_rollback_age_limit",
       "query": "Why did my rollback fail with a registry miss?",
-      "relevant": [{"document": "deployment", "contains": "older than fourteen days"}],
+      "relevant": [
+        {
+          "document": "deployment",
+          "contains": "older than fourteen days"
+        }
+      ],
       "reference": "Rollback is blocked when the target release tag is older than fourteen days, because artifacts older than that are garbage collected from the registry. Restore the artifact from cold storage first, which takes about eight minutes."
     },
     {
       "id": "q_readiness_probe",
       "query": "What does the readiness probe check?",
-      "relevant": [{"document": "deployment", "contains": "readiness probe queries"}],
+      "relevant": [
+        {
+          "document": "deployment",
+          "contains": "readiness probe queries"
+        }
+      ],
       "reference": "It queries the primary database, the graph store, and the object cache. A failure removes the instance from the load balancer rotation but does not terminate it."
     },
     {
       "id": "q_annual_refund",
       "query": "Can I get a refund on an annual plan?",
-      "relevant": [{"document": "billing", "contains": "within fourteen days of the billing date"}],
+      "relevant": [
+        {
+          "document": "billing",
+          "contains": "within fourteen days of the billing date"
+        }
+      ],
       "reference": "Yes, within fourteen days of the billing date. The refund is prorated against whole months consumed, not days."
     },
     {
       "id": "q_overage_refund",
       "query": "Are overage charges refundable?",
-      "relevant": [{"document": "billing", "contains": "not eligible for the fourteen day refund"}],
+      "relevant": [
+        {
+          "document": "billing",
+          "contains": "not eligible for the fourteen day refund"
+        }
+      ],
       "reference": "No. Overage charges are not eligible for the fourteen day refund window, because they represent consumption that already occurred."
     },
     {
       "id": "q_service_token_lost",
       "query": "I lost my service token, can I recover it?",
-      "relevant": [{"document": "auth", "contains": "cannot be recovered"}],
+      "relevant": [
+        {
+          "document": "auth",
+          "contains": "cannot be recovered"
+        }
+      ],
       "reference": "No. Service tokens are displayed once at creation and stored only as a hash, so a lost service token must be replaced rather than recovered."
     },
     {
       "id": "q_token_rotation",
       "query": "How do I rotate a workspace token without downtime?",
-      "relevant": [{"document": "auth", "contains": "issue a replacement token"}],
+      "relevant": [
+        {
+          "document": "auth",
+          "contains": "issue a replacement token"
+        }
+      ],
       "reference": "Issue a replacement token first, update the consumers, then revoke the original. Both are valid during an overlap of up to seven days, after which the original is revoked automatically."
     },
     {
       "id": "q_account_lockout",
       "query": "What happens after repeated failed sign in attempts?",
-      "relevant": [{"document": "auth", "contains": "lock the account for fifteen minutes"}],
+      "relevant": [
+        {
+          "document": "auth",
+          "contains": "lock the account for fifteen minutes"
+        }
+      ],
       "reference": "Five consecutive failed attempts lock the account for fifteen minutes. The lock applies to interactive sign in only and does not affect workspace or service tokens."
     },
     {
       "id": "q_audit_retention",
       "query": "How long are audit logs kept?",
-      "relevant": [{"document": "retention", "contains": "audit log entries are retained for four hundred days"}],
+      "relevant": [
+        {
+          "document": "retention",
+          "contains": "audit log entries are retained for four hundred days"
+        }
+      ],
       "reference": "Audit log entries are retained for four hundred days. Application logs are retained for thirty days."
     },
     {
       "id": "q_deletion_backups",
       "query": "After I request deletion, how long does data stay in backups?",
-      "relevant": [{"document": "retention", "contains": "ninety day cycle"}],
+      "relevant": [
+        {
+          "document": "retention",
+          "contains": "ninety day cycle"
+        }
+      ],
       "reference": "Backups are excluded from the thirty day deletion window and age out on their own ninety day cycle, so data may persist in backup for up to ninety days."
     },
     {
       "id": "q_rate_limit_service_token",
       "query": "What is the rate limit for a service token?",
-      "relevant": [{"document": "ratelimits", "contains": "three thousand requests per minute"}],
+      "relevant": [
+        {
+          "document": "ratelimits",
+          "contains": "three thousand requests per minute"
+        }
+      ],
       "reference": "A service token is limited to three thousand requests per minute. Limits are applied per token rather than per account."
     },
     {
       "id": "q_rate_limit_exceeded",
       "query": "What should a client do when it gets rate limited?",
-      "relevant": [{"document": "ratelimits", "contains": "honour the retry after value"}],
+      "relevant": [
+        {
+          "document": "ratelimits",
+          "contains": "honour the retry after value"
+        }
+      ],
       "reference": "Honour the retry after header rather than retrying immediately. Repeated immediate retries extend the window rather than resetting it."
     },
     {
       "id": "q_sev_one",
       "query": "What counts as a severity one incident?",
-      "relevant": [{"document": "incidents", "contains": "full outage or a confirmed data exposure"}],
+      "relevant": [
+        {
+          "document": "incidents",
+          "contains": "full outage or a confirmed data exposure"
+        }
+      ],
       "reference": "A full outage or a confirmed data exposure. It pages the on call engineer immediately."
     },
     {
       "id": "q_lower_severity",
       "query": "Who is allowed to lower the severity of an incident?",
-      "relevant": [{"document": "incidents", "contains": "only be lowered by the incident commander"}],
+      "relevant": [
+        {
+          "document": "incidents",
+          "contains": "only be lowered by the incident commander"
+        }
+      ],
       "reference": "Only the incident commander can lower severity, though anyone can raise it."
     },
     {
       "id": "q_invoice_retention_cross_doc",
       "query": "How long are invoices retained?",
       "relevant": [
-        {"document": "billing", "contains": "retained for seven years"},
-        {"document": "retention", "contains": "retained for seven years"}
+        {
+          "document": "billing",
+          "contains": "retained for seven years"
+        },
+        {
+          "document": "retention",
+          "contains": "retained for seven years"
+        }
       ],
       "reference": "Invoices are retained for seven years, which is a tax requirement. They are excluded from the standard retention windows.",
       "_note": "Deliberately answerable from two documents — tests that fusion rewards agreement rather than double-counting."
@@ -150,8 +294,14 @@
       "id": "q_pinned_channel_cross_doc",
       "query": "Which plan gets the pinned release channel?",
       "relevant": [
-        {"document": "billing", "contains": "carries the pinned release channel"},
-        {"document": "deployment", "contains": "Anchored support tier"}
+        {
+          "document": "billing",
+          "contains": "carries the pinned release channel"
+        },
+        {
+          "document": "deployment",
+          "contains": "Anchored support tier"
+        }
       ],
       "reference": "The Anchored plan carries the pinned release channel, which never advances automatically and upgrades on a schedule the customer controls.",
       "_note": "Requires joining a billing fact to a deployment fact."
@@ -169,6 +319,329 @@
       "relevant": [],
       "reference": "NOT_IN_CORPUS",
       "_note": "The corpus names the plans but never states a price. A retriever will surface the billing document; the generator must still decline to state a number."
+    },
+    {
+      "id": "q_key_rotation_schedule",
+      "query": "How often are encryption keys rotated?",
+      "relevant": [
+        {
+          "document": "keyrotation",
+          "contains": "every ninety days"
+        }
+      ],
+      "reference": "Workspace data encryption keys rotate automatically every ninety days."
+    },
+    {
+      "id": "q_key_rotation_not_token",
+      "query": "Does rotating an encryption key invalidate my tokens?",
+      "relevant": [
+        {
+          "document": "keyrotation",
+          "contains": "does not invalidate any token"
+        }
+      ],
+      "reference": "No. Key rotation and credential rotation are separate; neither triggers the other."
+    },
+    {
+      "id": "q_oncall_handover",
+      "query": "When does the on call rotation hand over?",
+      "relevant": [
+        {
+          "document": "oncall",
+          "contains": "Wednesday at ten hundred"
+        }
+      ],
+      "reference": "The on-call rotation hands over weekly, on Wednesday at 10:00 local time."
+    },
+    {
+      "id": "q_log_rotation",
+      "query": "How often do log files rotate?",
+      "relevant": [
+        {
+          "document": "observability",
+          "contains": "rotate hourly on the collector"
+        }
+      ],
+      "reference": "Log files rotate hourly on the collector and are compressed afterwards."
+    },
+    {
+      "id": "q_support_response_urgent",
+      "query": "How quickly will support reply to an urgent request on the Anchored plan?",
+      "relevant": [
+        {
+          "document": "support",
+          "contains": "one hour for urgent requests"
+        }
+      ],
+      "reference": "Anchored support targets a one hour first response for urgent requests, at any hour."
+    },
+    {
+      "id": "q_severity_two_paging",
+      "query": "Does a severity two incident page someone at night?",
+      "relevant": [
+        {
+          "document": "oncall",
+          "contains": "pages during business hours"
+        }
+      ],
+      "reference": "No. A severity two incident pages only during business hours in the responder's timezone."
+    },
+    {
+      "id": "q_escalation_clock",
+      "query": "If I escalate a support request, does the response clock restart?",
+      "relevant": [
+        {
+          "document": "support",
+          "contains": "does not reset the response target clock"
+        }
+      ],
+      "reference": "No. Manual escalation does not reset the clock, which runs from the original request time."
+    },
+    {
+      "id": "q_quota_vs_ratelimit",
+      "query": "What happens when a workspace runs out of storage?",
+      "relevant": [
+        {
+          "document": "quotas",
+          "contains": "quota exceeded response"
+        }
+      ],
+      "reference": "The write is rejected with a quota exceeded response and that resource type becomes read-only."
+    },
+    {
+      "id": "q_quota_recovery",
+      "query": "How do I get a workspace writable again after hitting its quota?",
+      "relevant": [
+        {
+          "document": "quotas",
+          "contains": "becomes writable again on the next write attempt"
+        }
+      ],
+      "reference": "Delete data; quota state is re-evaluated at write time, so no manual reset is needed."
+    },
+    {
+      "id": "q_quota_increase_starter",
+      "query": "Can a Starter plan workspace get a bigger storage quota?",
+      "relevant": [
+        {
+          "document": "quotas",
+          "contains": "not available on the Starter plan"
+        }
+      ],
+      "reference": "No. A Starter workspace must delete data or upgrade to Team."
+    },
+    {
+      "id": "q_error_e1042",
+      "query": "What does error E1042 mean?",
+      "relevant": [
+        {
+          "document": "cli",
+          "contains": "E1042"
+        }
+      ],
+      "reference": "The release tag was not found in the artifact registry, usually a rollback past the 14 day window."
+    },
+    {
+      "id": "q_error_e4021",
+      "query": "I got E4021 from the CLI, what is wrong?",
+      "relevant": [
+        {
+          "document": "cli",
+          "contains": "E4021"
+        }
+      ],
+      "reference": "A write was rejected because the workspace is at its storage quota. It is not a rate limit error."
+    },
+    {
+      "id": "q_error_scope_vs_expiry",
+      "query": "What is the difference between E3310 and E3311?",
+      "relevant": [
+        {
+          "document": "cli",
+          "contains": "E3310"
+        }
+      ],
+      "reference": "E3310 is a missing scope; E3311 is an expired token."
+    },
+    {
+      "id": "q_migration_id_format",
+      "query": "What does a migration id like 0142-add-workspace-index mean?",
+      "relevant": [
+        {
+          "document": "migrations",
+          "contains": "four digit sequence followed by a short slug"
+        }
+      ],
+      "reference": "A four digit sequence plus a short slug, allocated at merge time and never reused."
+    },
+    {
+      "id": "q_artifact_retention",
+      "query": "How long are build artifacts kept in the registry?",
+      "relevant": [
+        {
+          "document": "storage",
+          "contains": "retained in the registry for fourteen days"
+        }
+      ],
+      "reference": "Fourteen days, after which they are garbage collected to cold storage."
+    },
+    {
+      "id": "q_cold_storage_retention",
+      "query": "How long can I recover an old container image from cold storage?",
+      "relevant": [
+        {
+          "document": "storage",
+          "contains": "retained there for one year"
+        }
+      ],
+      "reference": "Cold storage keeps garbage collected artifacts for one year."
+    },
+    {
+      "id": "q_request_log_retention",
+      "query": "How long is the request log kept?",
+      "relevant": [
+        {
+          "document": "observability",
+          "contains": "request log is retained for thirty days"
+        }
+      ],
+      "reference": "Thirty days, matching the application log window."
+    },
+    {
+      "id": "q_key_version_retention",
+      "query": "How long are old encryption key versions kept?",
+      "relevant": [
+        {
+          "document": "keyrotation",
+          "contains": "one hundred and eighty days"
+        }
+      ],
+      "reference": "Old key versions are retained for 180 days, then objects referencing them are re-wrapped."
+    },
+    {
+      "id": "q_revert_schema_change",
+      "query": "How do I undo a schema change after a bad release?",
+      "relevant": [
+        {
+          "document": "migrations",
+          "contains": "roll the application back first"
+        }
+      ],
+      "reference": "Roll the application back, confirm health, then apply the inverse migration from the console."
+    },
+    {
+      "id": "q_forward_incompatible",
+      "query": "What do I do about a migration the previous version cannot run against?",
+      "relevant": [
+        {
+          "document": "migrations",
+          "contains": "expand step and a contract step"
+        }
+      ],
+      "reference": "Split it into expand and contract steps released at least one version apart."
+    },
+    {
+      "id": "q_webhook_retry_schedule",
+      "query": "How many times is a failed webhook delivery retried?",
+      "relevant": [
+        {
+          "document": "webhooks",
+          "contains": "fifth failed attempt"
+        }
+      ],
+      "reference": "Five attempts with exponential backoff, then the delivery is dropped and the endpoint marked degraded."
+    },
+    {
+      "id": "q_webhook_dedup",
+      "query": "How do I stop processing the same webhook event twice?",
+      "relevant": [
+        {
+          "document": "webhooks",
+          "contains": "event id that is stable across retries"
+        }
+      ],
+      "reference": "Deduplicate on the event id, which is stable across retries. Delivery is at least once."
+    },
+    {
+      "id": "q_webhook_secret_rotation",
+      "query": "Can I rotate a webhook signing secret without dropping deliveries?",
+      "relevant": [
+        {
+          "document": "webhooks",
+          "contains": "overlap period of twenty four hours"
+        }
+      ],
+      "reference": "Yes. Both signatures are accepted during a twenty four hour overlap."
+    },
+    {
+      "id": "q_deactivation_tokens",
+      "query": "When a user is deactivated in the directory, are their automation tokens revoked?",
+      "relevant": [
+        {
+          "document": "scim",
+          "contains": "does not revoke workspace tokens"
+        }
+      ],
+      "reference": "No. Only session tokens are revoked; workspace and service tokens are account scoped."
+    },
+    {
+      "id": "q_bulk_deactivation_guard",
+      "query": "What stops a bad directory filter from deleting everyone?",
+      "relevant": [
+        {
+          "document": "scim",
+          "contains": "more than ten percent of accounts"
+        }
+      ],
+      "reference": "A sync that would deactivate more than ten percent of accounts is halted for confirmation."
+    },
+    {
+      "id": "q_rollback_too_old_cross_doc",
+      "query": "Why can I not roll back to a release from last month?",
+      "relevant": [
+        {
+          "document": "deployment",
+          "contains": "older than fourteen days"
+        },
+        {
+          "document": "storage",
+          "contains": "retained in the registry for fourteen days"
+        }
+      ],
+      "reference": "Artifacts are garbage collected from the registry after fourteen days; restore from cold storage first."
+    },
+    {
+      "id": "q_anchored_benefits_cross_doc",
+      "query": "What do I get with the Anchored plan?",
+      "relevant": [
+        {
+          "document": "billing",
+          "contains": "Anchored is billed annually only"
+        },
+        {
+          "document": "support",
+          "contains": "Anchored support is included"
+        }
+      ],
+      "reference": "Annual billing, unlimited workspaces, the pinned release channel, and Anchored support."
+    },
+    {
+      "id": "q_unanswerable_oidc",
+      "query": "Which OIDC claims does Meridian map to workspace roles?",
+      "relevant": [],
+      "reference": "NOT_IN_CORPUS"
+    },
+    {
+      "id": "q_unanswerable_key_algorithm",
+      "query": "What encryption algorithm and key length does Meridian use?",
+      "relevant": [],
+      "reference": "NOT_IN_CORPUS"
+    },
+    {
+      "id": "q_unanswerable_webhook_ip",
+      "query": "What IP addresses do Meridian webhooks originate from?",
+      "relevant": [],
+      "reference": "NOT_IN_CORPUS"
     }
   ]
 }
