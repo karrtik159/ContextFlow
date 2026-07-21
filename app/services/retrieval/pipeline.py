@@ -38,6 +38,7 @@ from app.services.retrieval.sources import (
     search_memory,
     search_messages,
 )
+from app.services.retrieval.sufficiency import assess_sufficiency
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,18 @@ async def _run_db_arm(
     except Exception as exc:  # pragma: no cover - savepoint teardown only
         logger.warning("Savepoint teardown failed for arm '%s': %s", name, exc)
         return name, [], 0, f"{type(exc).__name__}: {exc}"
+
+
+async def _run_db_arm_value(db: AsyncSession, factory):
+    """Run a non-arm PostgreSQL call inside a SAVEPOINT.
+
+    Same reasoning as `_run_db_arm`: any statement error aborts the whole
+    transaction, and this call happens after retrieval has already succeeded.
+    Letting it poison the session would turn an optional check into a failure
+    of work that was already done.
+    """
+    async with db.begin_nested():
+        return await factory()
 
 
 async def _run_db_arms_serially(
@@ -413,6 +426,46 @@ async def run_retrieval(
                 "reranked": rerank_meta.get("ran", False),
                 "empty": not final,
             },
+        )
+    )
+
+    # ── Sufficiency ─────────────────────────────────────────
+    # Relevance says "this context is about the question". Sufficiency says
+    # "this context can answer it". Phase 3 measured that the first does not
+    # imply the second and that no threshold on a relevance score recovers it,
+    # so this is a separate stage with its own signal rather than another dial.
+    #
+    # It runs LAST, on the final context, because that is what the synthesis
+    # model will actually see — gating on the pre-truncation candidate pool
+    # would approve context the answer is not built from.
+    with _Timer() as sufficiency_timer:
+        if settings.SUFFICIENCY_ENABLED:
+            # Savepoint for the same reason the arms have one: this runs after
+            # retrieval already succeeded, and an error here must not poison a
+            # transaction that has real work in it.
+            verdict = await _run_db_arm_value(
+                db,
+                lambda: assess_sufficiency(
+                    db, retrieval_query, final, user_id=scoped_uuid
+                ),
+            )
+        else:
+            verdict = await assess_sufficiency(
+                db, retrieval_query, final, user_id=scoped_uuid
+            )
+    if not verdict.sufficient:
+        # The honest-empty path. Dropping the chunks rather than flagging them
+        # keeps `has_context` the single place callers ask this question.
+        trace.final_chunks = []
+    trace.record(
+        StageRecord(
+            name="sufficiency",
+            latency_ms=sufficiency_timer.ms,
+            input_summary=f"{len(final)} chunks, {retrieval_query[:120]!r}",
+            output_summary=(
+                "sufficient" if verdict.sufficient else f"abstain: {verdict.reason}"
+            ),
+            metadata=verdict.to_metadata(),
         )
     )
 

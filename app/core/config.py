@@ -242,6 +242,26 @@ class RerankSettings(BaseSettings):
     RERANK_TIMEOUT_S: float = 10.0
 
 
+# ── Context sufficiency / abstention (Phase 3→4) ────────────
+class SufficiencySettings(BaseSettings):
+    # Whether to answer at all. Measured twice in Phase 3 that this CANNOT be
+    # done with a relevance score: neither RETRIEVAL_MIN_SIMILARITY nor
+    # RERANK_MIN_SCORE separates answerable from unanswerable queries at any
+    # threshold. Sufficiency is a different quantity from relevance
+    # (arXiv 2411.06037) and needs its own signal.
+    #
+    # OFF by default until measured. Turning this on can only ADD refusals, and
+    # a wrongly refused real question is worse than an answered bad one.
+    SUFFICIENCY_ENABLED: bool = False
+
+    # How many salient query terms may be absent from the retrieved context
+    # before the context is judged insufficient. 0 is strict: every
+    # content-bearing word in the question must appear somewhere in what was
+    # retrieved. Raise it if the false-abstention rate on answerable queries is
+    # unacceptable — that rate, not the abstention rate, is the binding metric.
+    SUFFICIENCY_MAX_UNCOVERED_TERMS: int = 0
+
+
 # ── Query rewriting (Phase 3) ───────────────────────────────
 class QueryRewriteSettings(BaseSettings):
     # Deterministic, no-LLM expansion: acronym/identifier preservation and
@@ -289,6 +309,7 @@ class Settings(
     RetrievalSettings,
     SparseRetrievalSettings,
     RerankSettings,
+    SufficiencySettings,
     QueryRewriteSettings,
     LiveKitSettings,
     RAGServiceSettings,

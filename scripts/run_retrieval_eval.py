@@ -159,6 +159,8 @@ async def evaluate(
             abstentions.append(
                 {
                     "query": query.query,
+                    "category": query.category,
+                    "terms_all_in_corpus": query.terms_all_in_corpus,
                     "retrieved": len(trace.final_chunks),
                     "abstained": not trace.has_context,
                     "top_score": (
@@ -197,10 +199,40 @@ def print_report(scores, abstentions, k: int, min_similarity: float) -> dict:
     if abstentions:
         correct = sum(1 for a in abstentions if a["abstained"])
         print(f"\n  Abstention on unanswerable queries: {correct}/{len(abstentions)}")
+
+        # Per-category, because abstention accuracy is not one number. A
+        # mechanism can be perfect on out-of-database requests and useless on
+        # underspecified ones, and the aggregate hides precisely that.
+        by_category: dict[str, list] = {}
+        for a in abstentions:
+            by_category.setdefault(a.get("category") or "uncategorised", []).append(a)
+        print("\n    by category:")
+        for category, items in sorted(by_category.items()):
+            ok = sum(1 for i in items if i["abstained"])
+            print(f"      {category:<22} {ok}/{len(items)}")
+
+        # The split that decides whether a term-coverage heuristic is doing
+        # real work or just detecting a word the author left out.
+        hard = [a for a in abstentions if a.get("terms_all_in_corpus")]
+        easy = [a for a in abstentions if not a.get("terms_all_in_corpus")]
+        if hard:
+            ok_hard = sum(1 for a in hard if a["abstained"])
+            ok_easy = sum(1 for a in easy if a["abstained"])
+            print(
+                f"\n    all query terms present in corpus: {ok_hard}/{len(hard)}  "
+                f"(a coverage heuristic is structurally blind here)"
+            )
+            print(f"    some query term absent:            {ok_easy}/{len(easy)}")
+
+        print()
         for a in abstentions:
             mark = "OK  " if a["abstained"] else "LEAK"
             top = f"{a['top_score']:.3f}" if a["top_score"] is not None else "n/a"
-            print(f"    [{mark}] retrieved={a['retrieved']} top_score={top}  {a['query']}")
+            hard_flag = "H" if a.get("terms_all_in_corpus") else " "
+            print(
+                f"    [{mark}]{hard_flag} {(a.get('category') or '?'):<20} "
+                f"top={top}  {a['query'][:70]}"
+            )
 
     return {"aggregate": agg, "abstentions": abstentions}
 
@@ -392,6 +424,21 @@ async def main() -> int:
         help="measure dense / +sparse / +rerank / both — the Phase 3 exit criterion",
     )
     parser.add_argument(
+        "--sufficiency",
+        action="store_true",
+        help=(
+            "enable the SUFFICIENCY gate. Read the false-abstention count on "
+            "ANSWERABLE queries, not just the abstention count — refusing a real "
+            "question is the worse error."
+        ),
+    )
+    parser.add_argument(
+        "--sufficiency-max-uncovered",
+        type=int,
+        default=None,
+        help="override SUFFICIENCY_MAX_UNCOVERED_TERMS",
+    )
+    parser.add_argument(
         "--sweep-rerank",
         action="store_true",
         help="calibrate RERANK_MIN_SCORE, the abstention dial cosine could not provide",
@@ -401,6 +448,16 @@ async def main() -> int:
     args = parser.parse_args()
 
     _install_arm_stubs()
+
+    if args.sufficiency:
+        settings.SUFFICIENCY_ENABLED = True
+    if args.sufficiency_max_uncovered is not None:
+        settings.SUFFICIENCY_MAX_UNCOVERED_TERMS = args.sufficiency_max_uncovered
+    print(
+        f"sufficiency gate: {'ON' if settings.SUFFICIENCY_ENABLED else 'off'} "
+        f"(max_uncovered={settings.SUFFICIENCY_MAX_UNCOVERED_TERMS})"
+    )
+
     golden = load_golden_set(args.golden_set)
     print(
         f"golden set: {len(golden.documents)} documents, "

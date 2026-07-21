@@ -35,12 +35,36 @@ class RelevanceLabel:
     contains: str
 
 
+# Categories of unanswerable query, from UAEval4RAG (arXiv 2412.12300).
+# Recorded per-query because abstention accuracy is not one number: a system can
+# be perfect on out-of-database requests and useless on underspecified ones, and
+# an aggregate hides exactly that.
+UNANSWERABLE_CATEGORIES = frozenset(
+    {
+        "underspecified",  # essential information missing from the request
+        "false_presupposition",  # built on an assumption the corpus contradicts
+        "nonsensical",  # well-formed vocabulary, no coherent meaning
+        "modality_limited",  # asks for a format the system cannot produce
+        "safety_concerned",  # fulfilling it would plausibly cause harm
+        "out_of_database",  # topical, but the answer is not in the corpus
+    }
+)
+
+
 @dataclass(frozen=True)
 class GoldenQuery:
     id: str
     query: str
     relevant: list[RelevanceLabel]
     reference: str
+    category: str = ""
+    # True when EVERY salient term in the query appears somewhere in the
+    # corpus. These are the queries that defeat a term-coverage heuristic: it
+    # can only ever detect an unanswerable query by noticing a missing word, so
+    # it is blind to this whole class. Labelled explicitly so the eval reports
+    # the two populations separately instead of averaging a cheap win over a
+    # hard loss.
+    terms_all_in_corpus: bool = False
 
     @property
     def is_unanswerable(self) -> bool:
@@ -89,9 +113,21 @@ def load_golden_set(path: str | Path = DEFAULT_GOLDEN_SET) -> GoldenSet:
                     f"Query {q['id']!r} labels document {label.document!r}, "
                     f"which is not in the golden set."
                 )
+        category = q.get("category", "")
+        if category and category not in UNANSWERABLE_CATEGORIES:
+            raise ValueError(
+                f"Query {q['id']!r} has category {category!r}, which is not one of "
+                f"{sorted(UNANSWERABLE_CATEGORIES)}. A typo here would silently "
+                f"create a category that every per-category metric reports as empty."
+            )
         queries.append(
             GoldenQuery(
-                id=q["id"], query=q["query"], relevant=labels, reference=q.get("reference", "")
+                id=q["id"],
+                query=q["query"],
+                relevant=labels,
+                reference=q.get("reference", ""),
+                category=category,
+                terms_all_in_corpus=q.get("terms_all_in_corpus", False),
             )
         )
 

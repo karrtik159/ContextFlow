@@ -207,6 +207,69 @@ async def search_chunks_sparse(
     return results
 
 
+async def find_uncovered_terms(
+    db: AsyncSession,
+    *,
+    terms: list[str],
+    user_id: uuid.UUID,
+    ts_config: str | None = None,
+) -> list[str]:
+    """Which of `terms` appear NOWHERE in this tenant's corpus.
+
+    The question the sufficiency gate actually needs. Checking coverage against
+    the handful of retrieved chunks instead produces constant false refusals:
+    an ordinary adverb like "often" is missing from any given five chunks and
+    present somewhere in the corpus, and refusing a real question is the worse
+    error. Corpus-wide is both cheaper to reason about and the honest reading
+    of "the corpus does not cover this".
+
+    One round trip: an EXISTS probe per term against the same GIN index the
+    sparse arm uses.
+
+    A term whose tsquery is EMPTY — a Postgres stopword — is treated as
+    covered. It carries no topic, and reporting it as absent would make
+    "How is it done?" look like a query about undocumented subject matter.
+    """
+    _require_user_id(user_id, "find_uncovered_terms")
+
+    from sqlalchemy import String, bindparam, exists, func
+    from sqlalchemy import select as sa_select
+    from sqlalchemy.dialects.postgresql import ARRAY
+    from sqlalchemy.sql import literal_column
+
+    if not terms:
+        return []
+
+    config = ts_config or "english"
+    config_param = bindparam("ts_config", config, type_=REGCONFIG)
+
+    # `column_valued` names the column of a set-returning function, producing
+    # `unnest(...) AS anon(term)`. A plain `.alias()` emits `AS t` with no
+    # column name, and referencing `t.term` then fails at execution.
+    term_col = func.unnest(
+        bindparam("terms", terms, type_=ARRAY(String))
+    ).column_valued("term")
+
+    probe = func.plainto_tsquery(config_param, term_col)
+    covered = exists(
+        sa_select(literal_column("1"))
+        .select_from(Chunk)
+        .where(Chunk.user_id == user_id, Chunk.content_tsv.op("@@")(probe))
+    )
+
+    stmt = sa_select(term_col).where(
+        # `numnode` counts lexemes in the parsed query and is 0 for a term that
+        # is nothing but stopwords — verified against PostgreSQL 16. Comparing
+        # against an empty tsquery literal would need a cast SQLAlchemy cannot
+        # infer here.
+        func.numnode(probe) > 0,
+        ~covered,
+    )
+
+    rows = (await db.execute(stmt)).all()
+    return [row[0] for row in rows]
+
+
 async def search_messages(
     db: AsyncSession,
     *,

@@ -398,6 +398,72 @@ differs from MiniLM's.
 - Query rewriting/expansion; optional HyDE and multi-query behind flags.
 - **Exit criteria:** measurable recall@k and nDCG improvement on a labelled set (Phase 5 provides it).
 
+### Phase 3.5 — Abstention: a measured negative result
+
+**Status: MECHANISM BUILT, SHIPS DISABLED.** `SUFFICIENCY_ENABLED=False`.
+Tests 355→377. The finding is that the cheap mechanism does not work, and the
+value of the exercise is knowing that with numbers instead of by assumption.
+
+**The reframing.** Phase 3 established that no relevance threshold produces
+abstention. The literature names why: Google / UC San Diego, *Sufficient
+Context* (ICLR 2025, arXiv 2411.06037) distinguish **sufficiency** (does the
+context contain what is needed to answer) from **relevance** (is it about the
+question), and report the same failure mode — RAG *reduces* willingness to
+abstain. Sufficiency therefore became its own pipeline stage with its own
+signal, not another dial.
+
+**The eval set was rebuilt first, and this mattered more than the mechanism.**
+The original five unanswerable queries were all `out_of_database` AND all the
+easy sub-case where a query term (SAML, OIDC, euros) is simply absent from the
+corpus. Any coverage heuristic scores ~5/5 on that set while learning nothing.
+The set is now 21 unanswerable queries across all six UAEval4RAG categories
+(arXiv 2412.12300), of which **14 have every salient term present in the
+corpus** — the class a coverage heuristic is structurally blind to. A verifier
+checks that `terms_all_in_corpus` claim against the corpus text rather than
+trusting the label; it caught seven mislabelled queries, two of which had to be
+conceded as genuinely coverage-detectable.
+
+**Measured, corpus-wide term coverage, k=3, 43 answerable / 21 unanswerable:**
+
+| max_uncovered | recall@3 | false abstentions | abstained | hard 14 | easy 7 |
+|---------------|----------|-------------------|-----------|---------|--------|
+| gate off      | 1.000    | 0                 | 0/21      | 0/14    | 0/7    |
+| 0             | 0.605    | **17 of 43**      | 9/21      | 3/14    | 6/7    |
+| 1             | 0.837    | 7 of 43           | 5/21      | 0/14    | 5/7    |
+| 2             | 1.000    | 0                 | 1/21      | 0/14    | 1/7    |
+
+There is no usable operating point. Strict coverage refuses **17 of 43
+answerable queries** — a 40% false-refusal rate — to catch 9/21. The only
+setting that costs nothing catches 1/21.
+
+**Finding — it is not measuring answerability, it is measuring vocabulary
+mismatch.** The refused answerable queries are refused on ordinary English
+words that happen not to appear in the documentation:
+
+- "How long are audit logs **kept**?" — the corpus says *retained*.
+- "What **counts** as a severity one incident?" — the corpus never says *counts*.
+- "How **long** is it retained?" — *long* does not appear.
+
+This also invalidates the apparent 3/14 on the hard set: "How long is it
+retained?" abstained because of *long*, not because it is underspecified. Those
+three were false positives that happened to land on unanswerable queries. **True
+detection on the hard set is 0/14**, exactly as the module's
+`TestStructuralBlindSpots` asserts — a mechanism with no representation of
+underspecification, presupposition, or nonsense cannot detect any of them.
+
+Synonymy defeats term coverage in principle, not by tuning. The gate remains in
+the tree as a cheap pre-filter for the narrow out-of-database case, off by
+default, with its limits stated in tests rather than discovered later.
+
+**What is needed instead:** the sufficiency autorater — a prompted LLM
+classifying (query, retrieved chunks) as sufficient/insufficient BEFORE
+generation, ~93% against human expert labels, usable as a filter rather than a
+post-hoc audit. It costs one extra LLM call per knowledge query (1 → 2), which
+is a real cost against Phase 2's budget and must be measured against these same
+64 queries before it is switched on. A local NLI/entailment classifier (Vectara
+HHEM-2.1-Open loads through the same `sentence_transformers` CrossEncoder path
+as the reranker) is the cheaper approximation to try first.
+
 ### Phase 4 — Grounding + citations
 - Chunks reach the prompt as **fenced, numbered, citable blocks**; retrieved text is delimited and explicitly marked untrusted.
 - Response gains `citations: [{chunk_id, document_id, heading_path, score, span}]` and `trace_id`.

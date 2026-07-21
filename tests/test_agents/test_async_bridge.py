@@ -13,8 +13,7 @@ import threading
 
 import pytest
 
-from agents.crews.tools.async_bridge import run_async, _thread_local
-
+from agents.crews.tools.async_bridge import _thread_local, run_async
 
 # ── Helpers ──────────────────────────────────────────────────
 
