@@ -17,9 +17,13 @@ import uuid
 import pytest
 
 from app.models.document import Chunk, Document
-from app.services import ingestion
 from app.services.chunking import ChunkDraft
-from app.services.ingestion import compute_checksum, ingest_document
+
+# The implementation moved to the corpus lifecycle package in Phase 7;
+# app.services.ingestion is now a re-export shim, so patches must target the
+# real module or they patch names nothing reads.
+from app.services.corpus import store as ingestion
+from app.services.corpus.store import compute_checksum, ingest_document
 
 USER = uuid.UUID("11111111-1111-1111-1111-111111111111")
 OTHER_USER = uuid.UUID("22222222-2222-2222-2222-222222222222")

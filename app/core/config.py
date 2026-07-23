@@ -287,6 +287,15 @@ class RAGServiceSettings(BaseSettings):
     RAG_SERVICE_TOKEN: SecretStr = SecretStr("")
 
 
+# ── Semantic cache (Phase 7) ────────────────────────────────
+class SemanticCacheSettings(BaseSettings):
+    # Upper bound on how long a cached answer may be served. The primary
+    # invalidation signals are the corpus epoch and the cache_version
+    # fingerprint (app/services/semantic_cache.py); the TTL is the backstop
+    # for staleness those cannot see — the world changing, not the corpus.
+    SEMANTIC_CACHE_TTL_SECONDS: int = 7 * 24 * 3600
+
+
 # ── Observability ───────────────────────────────────────────
 class ObservabilitySettings(BaseSettings):
     LANGSMITH_API_KEY: SecretStr = SecretStr("")
@@ -313,6 +322,7 @@ class Settings(
     QueryRewriteSettings,
     LiveKitSettings,
     RAGServiceSettings,
+    SemanticCacheSettings,
     ObservabilitySettings,
 ):
     model_config = SettingsConfigDict(

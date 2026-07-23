@@ -64,6 +64,13 @@ class Document(Base):
     status: Mapped[str] = mapped_column(DocumentStatus, nullable=False, default="pending")
     token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # The ingested source, verbatim. This is what makes the corpus
+    # re-processable: `chunks.char_start/char_end` index THIS string, and
+    # re-chunking (chunker version bump) or re-embedding (dimension change)
+    # both need it. Nullable only because pre-Phase-7 rows have no source to
+    # backfill from — new ingests always write it.
+    raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )

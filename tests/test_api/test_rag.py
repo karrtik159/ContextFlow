@@ -298,10 +298,14 @@ async def test_rag_query_authenticated_cache_is_user_scoped(monkeypatch):
     async def embedding(*args, **kwargs):
         return [0.1, 0.2, 0.3]
 
-    async def cached_response(*, normalized_query, embedding, user_id):
+    async def cached_response(*, normalized_query, embedding, user_id, corpus_epoch=0):
         captured["normalized_query"] = normalized_query
         captured["embedding"] = embedding
         captured["user_id"] = user_id
+        # Phase 7: the endpoint resolves the tenant's corpus epoch and the
+        # lookup compares against it. A non-UUID scope like this one has no
+        # corpus, so it must read as epoch 0.
+        captured["corpus_epoch"] = corpus_epoch
         return "Cached scoped answer"
 
     monkeypatch.setattr(
@@ -333,6 +337,7 @@ async def test_rag_query_authenticated_cache_is_user_scoped(monkeypatch):
     assert data["user_id"] == "user-123"
     assert data["routed_to"] == "cache"
     assert captured["user_id"] == "user-123"
+    assert captured["corpus_epoch"] == 0
 
 
 @pytest.mark.asyncio

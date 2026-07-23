@@ -91,6 +91,7 @@ async def rag_query(
     3. Simple chat bypasses retrieval entirely.
     4. Knowledge queries run the deterministic pipeline, then ONE synthesis call.
     """
+    from app.services.corpus import get_corpus_epoch_safe
     from app.services.embeddings import embed_text_async_safe
     from app.services.llm_provider import classify_intent, direct_chat, stream_direct_chat
     from app.services.query_normalizer import normalize_for_cache_key, normalize_for_retrieval
@@ -121,6 +122,10 @@ async def rag_query(
 
     query_embedding = None
     if needs_rag:
+        # Resolved ONCE per request: the cache lookup compares against it and
+        # the populate task stamps it, so a corpus mutation mid-request cannot
+        # label a stale answer current (Phase 7, invariant 10).
+        corpus_epoch = await get_corpus_epoch_safe(db, resolved_user_id)
         # Embedded ONCE, reused by the cache lookup and every dense arm. The
         # old ReAct loop re-embedded per tool call.
         query_embedding = await embed_text_async_safe(retrieval_query)
@@ -129,6 +134,7 @@ async def rag_query(
                 normalized_query=cache_key_query,
                 embedding=query_embedding,
                 user_id=resolved_user_id,
+                corpus_epoch=corpus_epoch,
             )
             if cached_answer:
                 logger.info("Semantic Cache Hit: user=%s query='%s'", resolved_user_id, request.query[:80])
@@ -199,6 +205,7 @@ async def rag_query(
             answer=outcome.answer,
             user_id=resolved_user_id,
             session_id=None,
+            corpus_epoch=corpus_epoch,
         )
     if outcome.trace is not None:
         background_tasks.add_task(

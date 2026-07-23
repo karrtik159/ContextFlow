@@ -523,6 +523,88 @@ relevance, and context precision/recall are unmeasured.
 - Security leftovers: CORS `["*"]` + `allow_credentials=True` (Starlette echoes the Origin, defeating the browser protection); default `SECRET_KEY` boots and mints forgeable tokens; `str(e)` leaked to clients in `context.py`/`memory.py`; invalid JWT silently degrading to anonymous instead of `401`.
 - Decide the real PII policy (§2.3).
 
+### Phase 7 — Corpus lifecycle + invalidation (the stale-corpus hole)
+
+The corpus is currently append-only with no way to correct it: `app/api/v1/documents.py`
+exposes only ingest, an edited document gets a new checksum and becomes a *second*
+document, and nothing derived from the corpus (the Neo4j semantic cache) notices any
+change. Retrieval serves old and new versions side by side; the cache serves
+pre-change answers indefinitely.
+
+- **Store the source.** Add `documents.raw_text` (nullable; written on every new
+  ingest). Without it, re-chunking, re-embedding on a dimension change, and
+  char-span highlighting are all impossible — `char_start`/`char_end` index a string
+  we throw away today. Existing rows stay NULL and are re-ingested.
+- **`app/services/corpus/` package — the lifecycle component.** `store.py`:
+  `list_documents`, `delete_document`, `replace_document(document_id, text, ...)` =
+  delete + ingest in one transaction; `ingest_document` moves here unchanged (import
+  shim at the old path). Every function takes `user_id` — same required-tenant-scope
+  rule as retrieval (invariant 2).
+- **`events.py`: `corpus_changed(user_id)`** — the single after-commit hook every
+  mutation calls. Today it does two things: bump the tenant's corpus epoch and
+  invalidate that tenant's semantic cache. Future reindex triggers hang here rather
+  than being scattered across call sites.
+- **Corpus epoch.** New `user_corpus_state(user_id PK, epoch int, updated_at)` table.
+  `semantic_cache` stores the epoch (plus the Phase-4 `cache_version` hash and a TTL)
+  on each node; a lookup whose stored epoch ≠ the tenant's current epoch is a miss and
+  is deleted lazily. This gives Phase 4's cache-hardening bullet a concrete trigger
+  instead of time alone.
+- **API:** `GET /documents`, `DELETE /documents/{id}`, `PUT /documents/{id}` on the
+  existing router, scoped via `resolve_rag_user_id` exactly like ingest. Another
+  tenant's id returns 404, not 403 — do not confirm existence.
+- **Exit criteria:** upload → ask → answer cites v1; replace → same question misses
+  the cache and cites v2 only; delete → honest-empty. All three as API tests.
+
+### Phase 8 — Global components (behavior-preserving refactor)
+
+No retrieval behavior changes in this phase; the point is that the test suite and the
+golden-set metrics are identical before and after.
+
+- **Chunker registry + versioning.** `CHUNKER_VERSION` constant in `chunking.py`; new
+  `chunks.chunker_version` (server default 1) and `chunks.was_hard_split` columns —
+  the quality signal ingestion currently logs and discards. `app/services/chunkers/`
+  registry mapping `content_type → chunker`; markdown and plaintext both resolve to
+  today's algorithm, unknown types fall back loudly. HTML/PDF get a seam, not an
+  implementation. `scripts/rechunk_corpus.py` re-chunks + re-embeds any document whose
+  stored version < current (possible because Phase 7 stored `raw_text`).
+- **Arm registry.** `retrieval/arms.py`: `ArmSpec(name, kind: db|external, weight,
+  enabled(settings), build(ctx))` + an `ARM_REGISTRY` tuple. `run_retrieval` iterates
+  the registry; `SOURCE_WEIGHTS` derives from it. Adding an arm becomes one `ArmSpec`
+  instead of three synchronized edits. A parametrized contract test over the registry
+  enforces what is today only convention: 1-based ranks, required `user_id`,
+  empty-list-on-failure.
+- **Synthesis port.** `services/synthesis.py`: `synthesize(user_id, query, context)`
+  dispatching on `SYNTHESIS_BACKEND` (`crewai` default — behavior unchanged; `direct`
+  = one call through `get_async_llm_client` with the same system prompt).
+  `rag_service._synthesize` becomes the crewai implementation. The flag does NOT flip
+  in this phase and `routed_to` is untouched (invariant 7). What this buys: the hot
+  path stops being structurally welded to the heaviest dependency in the repo, and the
+  eventual flip is a config change measured against the golden set, not a rewrite.
+- **Exit criteria:** full suite green with zero edits to existing tests (new
+  registry/port tests only); retrieval eval metrics identical to the pre-refactor run.
+
+### Phase 9 — Parity and measured flips
+
+Each item is gated on a measurement, in keeping with Phase 3.5's precedent.
+
+- **Messages arm parity.** Migration: `messages.user_id` (backfill from
+  `chat_sessions`, then NOT NULL + index) — removes the join the HNSW pre-filter
+  weakness rides on; `search_messages` filters directly. Token-bound message
+  embeddings: an over-budget message embeds a budgeted head with a persisted
+  `embedding_truncated` flag and a loud log (invariant 6: flagged, never quiet).
+- **Token-budget context assembly.** `build_context_block` packs final chunks into
+  `CONTEXT_TOKEN_BUDGET` using the global `count_tokens` instead of trusting
+  `top_k × chunk-size`. Measured on the golden set before adoption.
+- **Flip `SYNTHESIS_BACKEND=direct`** once RAGAS generation metrics show parity with
+  the crew path. `routed_to` gains a documented `rag_direct` value at flip time — a
+  deliberate, test-updating change per invariant 7. CrewAI then remains only in
+  `MemoryCrew` and the fire-and-forget path.
+- **Data-driven deferrals** — decided from persisted traces, not assumption:
+  per-arm DB sessions to parallelize the Postgres group (only if `retrieve:fanout`
+  p95 shows the serial group is the bottleneck); semantic dedup in fusion (only if
+  trace analysis shows paraphrase duplicates reaching the synthesis window); learned
+  fusion weights (blocked on the harder golden corpus Phase 5 Finding 2 calls for).
+
 ---
 
 ## 5. Invariants — must hold at every phase
@@ -536,6 +618,8 @@ relevance, and context precision/recall are unmeasured.
 7. **`routed_to` is the observability contract.** Preserve existing values; additions are deliberate and documented.
 8. **External clients initialize lazily and thread-safely** (double-checked locking), never at import.
 9. **Don't cache what isn't grounded.**
+10. **Corpus mutations invalidate what derives from the corpus.** Every write goes through the lifecycle component and calls `corpus_changed`; a cache readable after the corpus changed under it is a bug, not a staleness tradeoff.
+11. **Every chunk row records the chunker that produced it.** A chunk without `chunker_version` is unmigratable; a heterogeneous-geometry corpus must be detectable by query, not by archaeology.
 
 ---
 

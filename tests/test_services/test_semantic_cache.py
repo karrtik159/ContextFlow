@@ -1,6 +1,11 @@
 import pytest
 
-from app.services.semantic_cache import get_cached_response, populate_semantic_cache
+from app.services.semantic_cache import (
+    cache_version,
+    get_cached_response,
+    invalidate_user_cache,
+    populate_semantic_cache,
+)
 
 
 class _FakeResult:
@@ -103,3 +108,80 @@ async def test_populate_semantic_cache_upserts_per_user_query(monkeypatch):
     assert "CREATE (c:SemanticCache" not in call["query"]
     assert call["params"]["user_id"] == "user-c"
     assert call["params"]["session_id"] == "session-1"
+
+
+# ── Phase 7: epoch / version / TTL validity ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_lookups_filter_on_epoch_version_and_ttl(monkeypatch):
+    """Both lookup shapes must carry all three validity predicates. The
+    coalesce(-1) form is what makes a pre-Phase-7 node — which has no epoch
+    property — fail against every real epoch instead of matching NULL-ishly."""
+    session = _FakeSession(records=[None, None])
+
+    async def fake_driver():
+        return _FakeDriver(session)
+
+    monkeypatch.setattr("app.services.semantic_cache.get_driver", fake_driver)
+
+    answer = await get_cached_response(
+        normalized_query="q",
+        embedding=[0.1],
+        user_id="user-d",
+        corpus_epoch=4,
+    )
+
+    assert answer is None
+    assert len(session.calls) == 2
+    for call in session.calls:
+        assert "coalesce(c.corpus_epoch, -1) = $corpus_epoch" in call["query"]
+        assert "coalesce(c.cache_version, '') = $cache_version" in call["query"]
+        assert "coalesce(c.timestamp, 0) >= $min_timestamp" in call["query"]
+        assert call["params"]["corpus_epoch"] == 4
+        assert call["params"]["cache_version"] == cache_version()
+        assert call["params"]["min_timestamp"] > 0
+
+
+@pytest.mark.asyncio
+async def test_populate_stamps_epoch_and_version(monkeypatch):
+    """An entry is stamped with the epoch the answer was RETRIEVED at, so a
+    corpus mutation between retrieval and this background task cannot label a
+    stale answer current."""
+    session = _FakeSession(records=[None])
+
+    async def fake_driver():
+        return _FakeDriver(session)
+
+    monkeypatch.setattr("app.services.semantic_cache.get_driver", fake_driver)
+
+    await populate_semantic_cache(
+        normalized_query="q",
+        embedding=[0.1],
+        answer="a",
+        user_id="user-e",
+        corpus_epoch=9,
+    )
+
+    call = session.calls[0]
+    assert "c.corpus_epoch = $corpus_epoch" in call["query"]
+    assert "c.cache_version = $cache_version" in call["query"]
+    assert call["params"]["corpus_epoch"] == 9
+    assert call["params"]["cache_version"] == cache_version()
+
+
+@pytest.mark.asyncio
+async def test_invalidate_user_cache_is_user_scoped(monkeypatch):
+    session = _FakeSession(records=[None])
+
+    async def fake_driver():
+        return _FakeDriver(session)
+
+    monkeypatch.setattr("app.services.semantic_cache.get_driver", fake_driver)
+
+    await invalidate_user_cache("user-f")
+
+    call = session.calls[0]
+    assert "DETACH DELETE c" in call["query"]
+    assert "user_id: $user_id" in call["query"]
+    assert call["params"]["user_id"] == "user-f"
