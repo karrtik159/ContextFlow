@@ -188,7 +188,8 @@ async def classify_intent(query: str) -> bool:
 
     # ── Layer 2: LLM classification (ambiguous queries) ────
     client = get_async_llm_client()
-    model = _get_model_name()
+    # One-word output; the cheap classifier model if configured (Phase 6).
+    model = settings.CLASSIFIER_MODEL or _get_model_name()
 
     try:
         response = await client.chat.completions.create(
@@ -274,6 +275,9 @@ async def stream_direct_chat(
         model=model,
         temperature=0.7,
         stream=True,
+        # Backstop against runaway generations, not a style constraint —
+        # prompts already ask for short conversational answers (Phase 6).
+        max_tokens=settings.LLM_MAX_TOKENS,
         messages=messages,
     )
 

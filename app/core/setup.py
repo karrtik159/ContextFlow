@@ -11,12 +11,56 @@ from fastapi.openapi.utils import get_openapi
 
 from app.core.config import EnvironmentOption, Settings
 from app.core.db import Base, engine
+from app.core.request_context import RequestIDMiddleware, install_record_factory
 from app.core.telemetry import init_telemetry, shutdown_telemetry
 from app.services.embeddings import init_local_embedding_model
 from app.services.graph_search import close_driver
 from app.services.semantic_cache import init_semantic_cache
 
 logger = logging.getLogger(__name__)
+
+# The shipped default from config.py. Compared verbatim at boot: a deployment
+# still carrying it mints forgeable tokens.
+_DEFAULT_SECRET_KEY = "super-secret-change-me-in-production"
+
+
+def enforce_boot_security(settings: Settings) -> None:
+    """Refuse to boot a non-local deployment with the default SECRET_KEY.
+
+    Every JWT this app mints is signed with it; a known key means anyone can
+    forge any user. Local development warns instead of failing, because a
+    fresh clone must still start.
+    """
+    if settings.SECRET_KEY.get_secret_value() != _DEFAULT_SECRET_KEY:
+        return
+    if settings.ENVIRONMENT == EnvironmentOption.LOCAL:
+        logger.warning(
+            "SECRET_KEY is the shipped default — fine for local, forgeable "
+            "anywhere else. Set a real key before deploying."
+        )
+        return
+    raise RuntimeError(
+        f"Refusing to start in {settings.ENVIRONMENT.value!r} with the default "
+        "SECRET_KEY: every token it signs is forgeable. Set SECRET_KEY."
+    )
+
+
+def resolve_cors_credentials(settings: Settings) -> bool:
+    """Credentialed CORS and a wildcard origin must never combine.
+
+    Starlette 'helpfully' echoes the request Origin when allow_origins=["*"]
+    is paired with allow_credentials=True, which defeats the browser's
+    protection entirely — any site can make credentialed calls. If the origin
+    list is a wildcard, credentials are disabled and that choice is logged.
+    """
+    if "*" in settings.CORS_ORIGINS:
+        logger.warning(
+            "CORS_ORIGINS contains '*'; disabling allow_credentials so the "
+            "wildcard cannot be combined with cookies/Authorization. List "
+            "explicit origins to re-enable credentialed CORS."
+        )
+        return False
+    return True
 
 
 # -------------- database --------------
@@ -87,13 +131,17 @@ def create_application(
     if lifespan is None:
         lifespan = lifespan_factory(settings, create_tables_on_start=create_tables_on_start)
 
+    enforce_boot_security(settings)
+    install_record_factory()
+
     application = FastAPI(lifespan=lifespan, **kwargs)
     application.include_router(router)
 
+    application.add_middleware(RequestIDMiddleware)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,
-        allow_credentials=True,
+        allow_credentials=resolve_cors_credentials(settings),
         allow_methods=settings.CORS_METHODS,
         allow_headers=settings.CORS_HEADERS,
     )

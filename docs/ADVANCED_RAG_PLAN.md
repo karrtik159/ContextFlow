@@ -528,6 +528,37 @@ relevance, and context precision/recall are unmeasured.
 - **Exit criteria:** a single command reports retrieval + generation metrics; regressions are visible.
 
 ### Phase 6 — Operational readiness
+
+**Status: DONE**, with two scope notes. (1) Rate limiting is an in-process
+sliding window per tenant on /rag/query and document ingest/replace — real for
+the single-process deployment this repo actually has; `app/core/rate_limit.py`
+is the seam a Redis-backed limiter drops into when replicas exist. (2) Metrics
+are in-process counters exposed at `/health/metrics` (routing mix, cache hits,
+fallback rate, MemoryCrew skips, rate-limit rejections) — chosen over a
+Prometheus client because no scrape infrastructure exists; the counter names
+are transport-portable. Shipped: request-ID middleware + response header +
+LogRecord stamping; `/health/ready` with real Postgres/Neo4j probes (503 on
+failure) alongside the unconditional liveness `/health`; telemetry that logs
+ERROR when a non-local deploy boots untraced; MemoryCrew substance gate
+(`MEMORY_MIN_QUERY_CHARS`/`MEMORY_MIN_ANSWER_CHARS`); `CLASSIFIER_MODEL` for
+the one-word intent call and `LLM_MAX_TOKENS` as the per-request completion
+ceiling; and the security leftovers — wildcard-CORS-with-credentials refused,
+default `SECRET_KEY` refuses to boot outside local, `str(e)` no longer leaves
+`context.py`, presented-but-invalid JWTs are 401 instead of silently
+anonymous, and JWT decode now precedes the blacklist query so junk tokens
+cost no DB roundtrip and fail closed when the DB is down.
+
+**PII policy (decided, closing §2.3):** masking is a CACHE-KEY normalization
+concern only — option (b), as this plan assumed. The raw query flows to the
+configured LLM provider, the crew, and Mem0; that is a documented property of
+the product, not an accident: masking retrieval/generation input is lossy and
+would degrade answers for a privacy guarantee the system cannot honestly make
+while long-term memory stores conversation content verbatim. A real inbound
+privacy control (masking before persistence and vendor calls) is a product
+decision with quality costs, to be taken up only when a compliance
+requirement names it. Until then: no PII-derived text is ever a cache key,
+and `X-Request-ID` correlation means log lines need never quote query bodies.
+
 - **Real rate limiting.** Currently zero: the stub has no call sites and no Redis exists. Authenticated users can still burn unbounded spend.
 - **Correlation IDs** — no request-ID middleware exists; logs identify requests by `query[:80]`, and nothing ties a log line to its LangSmith trace or its background `MemoryCrew` run. Return it in a response header.
 - **Metrics** — counters on `routed_to`, cache hit rate, `direct_fallback` rate, per-stage latency histograms, tokens/cost per tenant. Alert on `direct_fallback` rate: a total CrewAI outage currently looks like a healthy service returning slightly worse answers.

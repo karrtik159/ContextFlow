@@ -130,15 +130,19 @@ async def verify_token(
     """Verify a JWT token: decode, check blacklist, validate type.
 
     Returns TokenData if valid, None otherwise.
-    """
-    # 1. Check blacklist
-    is_blacklisted = await token_blacklist_crud.exists(db, token=token)
-    if is_blacklisted:
-        return None
 
-    # 2. Decode
+    Decode runs FIRST (Phase 6): a garbage or forged token must be rejected
+    by the signature check alone, not spend a database roundtrip on the
+    blacklist — and must still be rejected when the database is down.
+    """
+    # 1. Decode — no DB cost for junk tokens.
     payload = _decode_jwt(token)
     if payload is None:
+        return None
+
+    # 2. Check blacklist — only tokens we actually signed reach this query.
+    is_blacklisted = await token_blacklist_crud.exists(db, token=token)
+    if is_blacklisted:
         return None
 
     username_or_email: str | None = payload.get("sub")

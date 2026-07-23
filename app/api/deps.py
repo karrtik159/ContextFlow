@@ -68,8 +68,11 @@ async def get_optional_user(
     db: DBSession,
 ) -> dict[str, Any] | None:
     """
-    Attempt to extract and validate a Bearer token from the request.
-    Returns user dict if valid, None otherwise. Never raises.
+    ABSENT credentials mean anonymous; PRESENTED-but-invalid credentials are
+    an error (Phase 6). The old behavior — swallowing the 401 and degrading to
+    anonymous — turned an expired token into a silent loss of scope: the
+    caller kept getting 200s while quietly reading an empty corpus, and a
+    stolen-but-revoked token probed endpoints indistinguishably from a guest.
     """
     auth_header = request.headers.get("Authorization")
     if not auth_header:
@@ -77,12 +80,14 @@ async def get_optional_user(
 
     parts = auth_header.split()
     if len(parts) != 2 or parts[0].lower() != "bearer":
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Malformed Authorization header.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-    try:
-        return await get_current_user(parts[1], db)
-    except HTTPException:
-        return None
+    # get_current_user raises 401 for invalid/expired/revoked — let it.
+    return await get_current_user(parts[1], db)
 
 
 OptionalUser = Annotated[dict[str, Any] | None, Depends(get_optional_user)]

@@ -44,7 +44,16 @@ def init_telemetry() -> None:
 
     api_key = settings.LANGSMITH_API_KEY.get_secret_value()
     if not api_key:
-        logger.info("LANGSMITH_API_KEY not set — skipping telemetry setup")
+        # Fail LOUD outside local (Phase 6): a production deploy with a
+        # missing key previously ran fully untraced behind one info line.
+        if settings.ENVIRONMENT.value == "local":
+            logger.info("LANGSMITH_API_KEY not set — skipping telemetry setup")
+        else:
+            logger.error(
+                "LANGSMITH_API_KEY not set in %r — this deployment is running "
+                "UNTRACED. Every LLM call, crew run, and failure is invisible.",
+                settings.ENVIRONMENT.value,
+            )
         return
 
     # LangSmith reads these env vars directly

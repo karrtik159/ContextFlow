@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 from uuid import UUID
 
@@ -7,6 +8,8 @@ from pydantic import BaseModel, Field
 from app.api.deps import DBSession, OptionalUser, is_valid_rag_service_request, resolve_rag_user_id
 from app.services.embeddings import embed_text_async
 from app.services.vector_search import search_similar_messages
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/context", tags=["Context"])
 
@@ -87,8 +90,12 @@ async def prefetch_context(
         context_block = "\n".join(context_lines)
         return {"context": f"Relevant context from previous memory/conversations:\n{context_block}"}
 
-    except Exception as e:
+    except Exception:
+        # The real error goes to the log with the request id; the client gets
+        # a generic message. Exception text can carry connection strings,
+        # SQL fragments, and file paths (Phase 6).
+        logger.exception("Context prefetch failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Context prefetch failed: {str(e)}",
-        )
+            detail="Context prefetch failed.",
+        ) from None

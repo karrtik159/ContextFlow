@@ -15,6 +15,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import DBSession, OptionalUser, is_valid_rag_service_request, resolve_rag_user_id
+from app.core.config import settings
+from app.core.metrics import increment
+from app.core.rate_limit import check_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,31 @@ class RAGQueryResponse(BaseModel):
     routed_to: str = Field(description="'cache' for semantic hit, 'direct' for simple chat, 'crewai' for RAG queries.")
     trace_id: uuid.UUID | None = None
     citations: list[Citation] = Field(default_factory=list)
+
+
+def _memory_worthy(query: str, answer: str) -> bool:
+    """Substance gate for MemoryCrew (Phase 6).
+
+    The crew costs 3-6 LLM calls per run and previously fired on every query,
+    spending them to remember "thanks". A tiny query or a tiny answer carries
+    nothing a knowledge graph needs.
+    """
+    return (
+        len(query.strip()) >= settings.MEMORY_MIN_QUERY_CHARS
+        and len(answer.strip()) >= settings.MEMORY_MIN_ANSWER_CHARS
+    )
+
+
+def _schedule_memory(background_tasks: BackgroundTasks, *, query: str, answer: str, user_id: str) -> None:
+    """Queue MemoryCrew iff the exchange clears the substance gate."""
+    if not _memory_worthy(query, answer):
+        increment("memory_crew.skipped_trivial")
+        logger.debug("MemoryCrew skipped (trivial exchange) — user=%s", user_id)
+        return
+    increment("memory_crew.scheduled")
+    background_tasks.add_task(
+        _process_memory_background, query=query, answer=answer, user_id=user_id
+    )
 
 
 def _process_memory_background(query: str, answer: str, user_id: str):
@@ -114,6 +142,10 @@ async def rag_query(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # After the 401: what this bounds is authenticated spend (Phase 6).
+    check_rate_limit(f"rag:{resolved_user_id}")
+    increment("rag.requests")
+
     # Two different normalizations for two different jobs — see query_normalizer.
     cache_key_query = normalize_for_cache_key(request.query)
     retrieval_query = normalize_for_retrieval(request.query)
@@ -138,6 +170,7 @@ async def rag_query(
             )
             if cached_answer:
                 logger.info("Semantic Cache Hit: user=%s query='%s'", resolved_user_id, request.query[:80])
+                increment("rag.routed.cache")
                 return RAGQueryResponse(
                     answer=cached_answer,
                     query=request.query,
@@ -149,6 +182,7 @@ async def rag_query(
     if not needs_rag:
         logger.info("Intent: simple chat — bypassing retrieval for '%s'", request.query[:80])
 
+        increment("rag.routed.direct")
         if request.stream:
             collected: list[str] = []
 
@@ -156,8 +190,8 @@ async def rag_query(
                 async for chunk in stream_direct_chat(request.query):
                     collected.append(chunk)
                     yield chunk
-                background_tasks.add_task(
-                    _process_memory_background,
+                _schedule_memory(
+                    background_tasks,
                     query=request.query,
                     answer="".join(collected),
                     user_id=resolved_user_id,
@@ -166,8 +200,8 @@ async def rag_query(
             return StreamingResponse(_stream_generator(), media_type="text/plain")
 
         answer = await direct_chat(request.query)
-        background_tasks.add_task(
-            _process_memory_background,
+        _schedule_memory(
+            background_tasks,
             query=request.query, answer=answer, user_id=resolved_user_id,
         )
         return RAGQueryResponse(
@@ -180,6 +214,7 @@ async def rag_query(
         # running a pipeline whose main arm cannot participate.
         logger.warning("Embedding unavailable; degrading to direct chat for '%s'", request.query[:80])
         answer = await direct_chat(request.query)
+        increment("rag.routed.direct_fallback")
         return RAGQueryResponse(
             answer=answer, query=request.query, user_id=resolved_user_id,
             routed_to="direct_fallback",
@@ -193,8 +228,9 @@ async def rag_query(
         query_embedding=query_embedding,
     )
 
-    background_tasks.add_task(
-        _process_memory_background,
+    increment(f"rag.routed.{outcome.routed_to}")
+    _schedule_memory(
+        background_tasks,
         query=request.query, answer=outcome.answer, user_id=resolved_user_id,
     )
     if outcome.cacheable:

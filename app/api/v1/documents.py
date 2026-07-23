@@ -26,6 +26,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import DBSession, OptionalUser, is_valid_rag_service_request, resolve_rag_user_id
+from app.core.rate_limit import check_rate_limit
 from app.services.corpus import (
     corpus_changed,
     delete_document,
@@ -137,6 +138,8 @@ async def ingest(
 ) -> DocumentIngestResponse:
     """Crack, chunk, embed, and index a document under the caller's scope."""
     owner_id = _resolve_owner_id(request.user_id, user, http_request)
+    # Ingest carries an embedding bill per chunk — bounded per tenant (Phase 6).
+    check_rate_limit(f"documents:{owner_id}")
 
     try:
         result = await ingest_document(
@@ -233,6 +236,8 @@ async def replace(
     user: OptionalUser = None,
 ) -> DocumentIngestResponse:
     owner_id = _resolve_owner_id(request.user_id, user, http_request)
+    # Same embedding bill as ingest, same bound (Phase 6).
+    check_rate_limit(f"documents:{owner_id}")
 
     try:
         result = await replace_document(

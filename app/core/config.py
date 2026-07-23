@@ -105,6 +105,16 @@ class AISettings(BaseSettings):
     LLM_PROVIDER: str = "openai"
     LLM_MODEL: str = "gpt-4.1-mini"
 
+    # Model for the intent classifier's LLM fallback. Empty → LLM_MODEL. The
+    # classifier emits ONE word; paying the flagship model's rates for it is
+    # pure waste — point this at the cheapest model the provider offers.
+    CLASSIFIER_MODEL: str = ""
+
+    # Per-request completion ceiling for direct chat and direct synthesis.
+    # A runaway generation is a cost bug the caller cannot see; the prompt
+    # already asks for ~150 words, so this is a backstop, not a constraint.
+    LLM_MAX_TOKENS: int = 1024
+
     # OpenAI / OpenRouter
     OPENAI_API_KEY: SecretStr = SecretStr("")
     OPENAI_BASE_URL: str = ""
@@ -287,6 +297,21 @@ class RAGServiceSettings(BaseSettings):
     RAG_SERVICE_TOKEN: SecretStr = SecretStr("")
 
 
+# ── Operational (Phase 6) ───────────────────────────────────
+class OpsSettings(BaseSettings):
+    # Sliding-window limit per tenant per minute on the spend-bearing paths
+    # (/rag/query, document ingest/replace). In-process — see
+    # app/core/rate_limit.py for the single-process caveat and the Redis seam.
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_RPM: int = 30
+
+    # MemoryCrew substance gate. The crew costs 3-6 LLM calls per run and
+    # previously fired on EVERY query — including "thanks". A query or answer
+    # below these floors carries nothing worth remembering.
+    MEMORY_MIN_QUERY_CHARS: int = 12
+    MEMORY_MIN_ANSWER_CHARS: int = 40
+
+
 # ── Synthesis (Phase 8) ─────────────────────────────────────
 class SynthesisSettings(BaseSettings):
     # Which backend renders the final answer from retrieved context.
@@ -347,6 +372,7 @@ class Settings(
     QueryRewriteSettings,
     LiveKitSettings,
     RAGServiceSettings,
+    OpsSettings,
     SynthesisSettings,
     SemanticCacheSettings,
     ObservabilitySettings,
