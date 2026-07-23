@@ -171,6 +171,29 @@ async def test_populate_stamps_epoch_and_version(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_default_score_threshold_is_provider_aware_and_stricter_than_095(monkeypatch):
+    """Phase 4 cache hardening: the floor that decides whether two DIFFERENT
+    questions get the SAME answer must be stricter than the old 0.95, and
+    per-provider — MiniLM's similarity distribution runs hotter than OpenAI's."""
+    from app.core.config import settings
+
+    session = _FakeSession(records=[None, None])
+
+    async def fake_driver():
+        return _FakeDriver(session)
+
+    monkeypatch.setattr("app.services.semantic_cache.get_driver", fake_driver)
+    monkeypatch.setattr(settings, "SEMANTIC_CACHE_SCORE_THRESHOLD", None)
+    monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "huggingface")
+
+    await get_cached_response(normalized_query="q", embedding=[0.1], user_id="u")
+
+    vector_call = session.calls[1]
+    assert vector_call["params"]["score_threshold"] > 0.95
+    assert vector_call["params"]["score_threshold"] == 0.985
+
+
+@pytest.mark.asyncio
 async def test_invalidate_user_cache_is_user_scoped(monkeypatch):
     session = _FakeSession(records=[None])
 

@@ -310,6 +310,16 @@ class SemanticCacheSettings(BaseSettings):
     # for staleness those cannot see — the world changing, not the corpus.
     SEMANTIC_CACHE_TTL_SECONDS: int = 7 * 24 * 3600
 
+    # Vector-similarity floor for serving a cached answer to a NEW query.
+    # None → a per-provider default in semantic_cache.py. This floor decides
+    # whether two questions get the same answer, so it must be strict: on
+    # short normalized queries encoders routinely exceed 0.95 for pairs
+    # differing only by a negation or a single entity ("is X covered" vs
+    # "is X NOT covered") — which is why the old hardcoded 0.95 was unsafe.
+    # Set explicitly only after a calibration sweep against the deployed
+    # embedding model.
+    SEMANTIC_CACHE_SCORE_THRESHOLD: float | None = None
+
 
 # ── Observability ───────────────────────────────────────────
 class ObservabilitySettings(BaseSettings):

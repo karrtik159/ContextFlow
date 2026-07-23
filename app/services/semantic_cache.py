@@ -53,6 +53,31 @@ def _min_valid_timestamp_ms() -> int:
     return int(time.time() * 1000) - settings.SEMANTIC_CACHE_TTL_SECONDS * 1000
 
 
+# Per-provider similarity floors, used when SEMANTIC_CACHE_SCORE_THRESHOLD is
+# unset. Deliberately stricter than the old hardcoded 0.95: this floor decides
+# whether two DIFFERENT questions receive the SAME cached answer, and near-
+# duplicate queries differing by a negation or one entity routinely clear 0.95.
+# MiniLM's similarity distribution runs hotter than OpenAI's on short text, so
+# its floor is higher. CONSERVATIVE PENDING CALIBRATION — run a sweep against
+# the deployed model before trusting these further than "safer than 0.95".
+_PROVIDER_SCORE_THRESHOLDS = {
+    "openai": 0.97,
+    "huggingface": 0.985,
+}
+_FALLBACK_SCORE_THRESHOLD = 0.97
+
+
+def _score_threshold() -> float:
+    from app.core.config import settings
+
+    configured = settings.SEMANTIC_CACHE_SCORE_THRESHOLD
+    if configured is not None:
+        return configured
+    return _PROVIDER_SCORE_THRESHOLDS.get(
+        settings.EMBEDDING_PROVIDER, _FALLBACK_SCORE_THRESHOLD
+    )
+
+
 async def init_semantic_cache():
     """
     Ensures that the necessary Vector Index exists in Neo4j for fast semantic lookups.
@@ -106,7 +131,7 @@ async def get_cached_response(
     *,
     corpus_epoch: int = 0,
     candidate_count: int = 50,
-    score_threshold: float = 0.95,
+    score_threshold: float | None = None,
 ) -> str | None:
     """
     Return a cached answer for this user only.
@@ -167,7 +192,9 @@ async def get_cached_response(
             vector_query,
             embedding=embedding,
             candidate_count=max(1, candidate_count),
-            score_threshold=score_threshold,
+            score_threshold=(
+                score_threshold if score_threshold is not None else _score_threshold()
+            ),
             **shared_params,
         )
         record = await result.single()

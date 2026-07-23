@@ -465,6 +465,21 @@ HHEM-2.1-Open loads through the same `sentence_transformers` CrossEncoder path
 as the reranker) is the cheaper approximation to try first.
 
 ### Phase 4 — Grounding + citations
+
+**Status: DONE.** Fenced blocks, citations + trace_id in the response, and the
+grounded-only cache gate shipped in Phases 2–3. The remainder landed with
+Phase 7 (TTL + `cache_version` + corpus-epoch invalidation) and the citation
+validator (`app/services/grounding.py`): every `[n]` is resolved against the
+supplied blocks post-synthesis, unresolvable labels are stripped from the
+answer, and `grounded` is now EARNED — at least one citation, all resolvable —
+rather than assumed from synthesis succeeding. The exit criterion holds: a
+non-cached answer either carries resolvable citations or is explicitly
+ungrounded and uncacheable. The optional deeper groundedness pass (NLI-style
+claim verification) remains deliberately unbuilt: it costs an LLM call per
+answer and must earn itself against measured hallucination rates, per the
+Phase 3.5 precedent. The cache similarity floor is now provider-aware
+(0.97 openai / 0.985 MiniLM, conservative pending a calibration sweep).
+
 - Chunks reach the prompt as **fenced, numbered, citable blocks**; retrieved text is delimited and explicitly marked untrusted.
 - Response gains `citations: [{chunk_id, document_id, heading_path, score, span}]` and `trace_id`.
 - Post-hoc validation that every `[n]` in the answer resolves to a real supplied chunk; reject/repair otherwise.

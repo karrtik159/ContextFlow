@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.services.grounding import validate_citations
 from app.services.retrieval.contracts import RetrievalTrace, StageRecord
 from app.services.retrieval.pipeline import build_context_block, run_retrieval
 
@@ -171,11 +172,45 @@ async def answer_knowledge_query(
             llm_calls=2,
         )
 
+    # ── Citation validation (Phase 4 exit criterion) ────────
+    # grounded is EARNED here, not assumed from synthesis having succeeded:
+    # every [n] must resolve to a supplied block, and citing nothing is also
+    # ungrounded. Unresolvable labels are stripped (repair) — the prose
+    # usually survives its bad footnote; the cache must not.
+    check = validate_citations(answer, trace.final_chunks)
+    if check.was_repaired:
+        logger.warning(
+            "Answer cited %s which resolve to no supplied block — stripped, "
+            "marked ungrounded. user=%s", list(check.unresolvable), user_id,
+        )
+    answer = check.answer
+    trace.record(
+        StageRecord(
+            name="cite_check",
+            latency_ms=0,
+            input_summary=f"{len(check.cited)} distinct citations",
+            output_summary="grounded" if check.grounded else "ungrounded",
+            metadata=check.to_metadata(),
+        )
+    )
+    if len(answer) < MIN_PLAUSIBLE_ANSWER_CHARS:
+        # An answer that was nothing but bad citations. Same degradation as a
+        # short answer, because that is what it is.
+        logger.warning("Answer was implausibly short after citation repair; degrading")
+        fallback = await direct_chat(original_query)
+        return RagOutcome(
+            answer=fallback,
+            routed_to="direct_fallback",
+            trace=trace,
+            grounded=False,
+            llm_calls=2,
+        )
+
     outcome = RagOutcome(
         answer=answer,
         routed_to="crewai",
         trace=trace,
-        grounded=True,
+        grounded=check.grounded,
         llm_calls=1,
     )
     outcome.cacheable = should_cache(outcome)
