@@ -167,6 +167,15 @@ class RetrievalSettings(BaseSettings):
     # Final context size handed to synthesis.
     RETRIEVAL_TOP_K: int = 5
 
+    # Token ceiling on the ASSEMBLED context block, measured with the embedding
+    # tokenizer (Phase 9). A backstop against trusting `top_k × chunk-size`:
+    # a hard-split giant chunk, or concatenated graph/memory text, can make the
+    # real prompt far larger than top_k suggests. Default is generous enough
+    # that the ordinary top_k=5 case is never trimmed — it bounds the
+    # pathological case. Tighten only after measuring answer quality vs. cost
+    # on the golden set.
+    CONTEXT_TOKEN_BUDGET: int = 4096
+
     # Cosine-similarity floor for the dense arms. Applied per-source, where the
     # score is calibrated — an RRF score is not, so it cannot carry a floor.
     # Retrieving nothing is a valid, honest outcome; the previous code had no

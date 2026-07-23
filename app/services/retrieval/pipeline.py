@@ -456,24 +456,55 @@ async def run_retrieval(
     return trace
 
 
-def build_context_block(chunks: list[RetrievedChunk]) -> str:
+def _render_block(chunk: RetrievedChunk) -> str:
+    header = chunk.citation_label
+    if chunk.heading_path:
+        header = f"{header} {chunk.heading_path}"
+    return (
+        f"<<<CONTEXT {header} (source: {chunk.source})>>>\n"
+        f"{chunk.text.strip()}\n"
+        f"<<<END CONTEXT {chunk.citation_label}>>>"
+    )
+
+
+def build_context_block(
+    chunks: list[RetrievedChunk], *, token_budget: int | None = None
+) -> str:
     """Render retrieved chunks as fenced, numbered, citable blocks.
 
     Retrieved text is DATA, not instructions (§5.4). It is fenced and explicitly
     labelled untrusted so that a stored-injection payload reads as quoted
     material rather than as a directive the model should follow.
+
+    The assembled block is bounded to `token_budget` (default
+    CONTEXT_TOKEN_BUDGET), measured with the embedding tokenizer (Phase 9).
+    Blocks are added in fused order until the next would exceed the budget; the
+    first is always included even if it alone is over, because returning no
+    context when retrieval found something would be a worse failure than a long
+    prompt. Dropped blocks are logged, never silently discarded (invariant 6) —
+    a budget that regularly trims is a signal to widen it or tighten chunking,
+    not to ignore.
     """
     if not chunks:
         return "NO CONTEXT RETRIEVED."
 
+    from app.services.embeddings import count_tokens
+
+    budget = token_budget if token_budget is not None else settings.CONTEXT_TOKEN_BUDGET
+
     parts: list[str] = []
-    for chunk in chunks:
-        header = chunk.citation_label
-        if chunk.heading_path:
-            header = f"{header} {chunk.heading_path}"
-        parts.append(
-            f"<<<CONTEXT {header} (source: {chunk.source})>>>\n"
-            f"{chunk.text.strip()}\n"
-            f"<<<END CONTEXT {chunk.citation_label}>>>"
-        )
+    used = 0
+    for index, chunk in enumerate(chunks):
+        block = _render_block(chunk)
+        cost = count_tokens(block)
+        if parts and used + cost > budget:
+            dropped = len(chunks) - index
+            logger.info(
+                "Context budget %d reached after %d/%d blocks; dropped %d "
+                "lower-ranked block(s) from the prompt.",
+                budget, index, len(chunks), dropped,
+            )
+            break
+        parts.append(block)
+        used += cost
     return "\n\n".join(parts)

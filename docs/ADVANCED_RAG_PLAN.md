@@ -633,18 +633,34 @@ golden-set metrics are identical before and after.
 
 Each item is gated on a measurement, in keeping with Phase 3.5's precedent.
 
-- **Messages arm parity.** Migration: `messages.user_id` (backfill from
-  `chat_sessions`, then NOT NULL + index) — removes the join the HNSW pre-filter
-  weakness rides on; `search_messages` filters directly. Token-bound message
-  embeddings: an over-budget message embeds a budgeted head with a persisted
-  `embedding_truncated` flag and a loud log (invariant 6: flagged, never quiet).
-- **Token-budget context assembly.** `build_context_block` packs final chunks into
-  `CONTEXT_TOKEN_BUDGET` using the global `count_tokens` instead of trusting
-  `top_k × chunk-size`. Measured on the golden set before adoption.
+**Structural pieces — DONE (code + unit tests; migration pending
+`alembic upgrade head`):**
+
+- **Messages arm parity.** Migration `d0e1f2a3b4c5`: `messages.user_id`
+  (backfilled from `chat_sessions`, then NOT NULL + index) removes the join the
+  HNSW pre-filter weakness rode on. `search_messages` and
+  `search_similar_messages` now filter on `messages.user_id` directly, exactly
+  as the corpus arm does; the message write path resolves the owner from the
+  session server-side and denormalizes it. Token-bound message embeddings:
+  `embeddings.head_within_token_budget` embeds a budgeted head for an
+  over-ceiling message and persists `messages.embedding_truncated` with a loud
+  log (invariant 6: flagged, never quiet).
+- **Token-budget context assembly.** `build_context_block` packs blocks into
+  `CONTEXT_TOKEN_BUDGET` measured with `count_tokens`, dropping lower-ranked
+  blocks (logged) rather than trusting `top_k × chunk-size`. Default 4096 is
+  generous enough that the ordinary top_k=5 case is never trimmed — it bounds
+  the pathological (hard-split / concatenated-arm) case. The tighter,
+  quality-tuned value is the part still gated on the golden set.
+
+**Still gated on live infrastructure:**
+
 - **Flip `SYNTHESIS_BACKEND=direct`** once RAGAS generation metrics show parity with
   the crew path. `routed_to` gains a documented `rag_direct` value at flip time — a
   deliberate, test-updating change per invariant 7. CrewAI then remains only in
-  `MemoryCrew` and the fire-and-forget path.
+  `MemoryCrew` and the fire-and-forget path. (Port is built and default-crewai;
+  only the measured flip remains — needs a running backend + `OPENAI_API_KEY`.)
+- **Tighten `CONTEXT_TOKEN_BUDGET`** against measured answer-quality-vs-cost on
+  the golden set.
 - **Data-driven deferrals** — decided from persisted traces, not assumption:
   per-arm DB sessions to parallelize the Postgres group (only if `retrieve:fanout`
   p95 shows the serial group is the bottleneck); semantic dedup in fusion (only if

@@ -7,7 +7,6 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.chat_session import ChatSession
 from app.models.message import Message
 
 
@@ -46,11 +45,15 @@ async def search_similar_messages(
             "search would read across all tenants."
         )
 
+    # Filter on messages.user_id directly — never via a join to chat_sessions.
+    # pgvector's HNSW scan applies the WHERE after walking its global candidate
+    # set, so a tenant filter on a joined table collapses recall as the table
+    # grows. The denormalized column (Phase 9) is what keeps the filter on the
+    # same row the index walks.
     stmt = (
         select(Message)
-        .join(Message.session)
         .where(Message.embedding.is_not(None))
-        .where(ChatSession.user_id == user_id)
+        .where(Message.user_id == user_id)
         .order_by(Message.embedding.cosine_distance(query_embedding))
         .limit(limit)
     )

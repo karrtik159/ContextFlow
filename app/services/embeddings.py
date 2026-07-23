@@ -152,6 +152,35 @@ def count_tokens(text: str) -> int:
     return len(_get_tiktoken_encoding().encode(text))
 
 
+def head_within_token_budget(text: str, *, max_tokens: int) -> tuple[str, bool]:
+    """Largest prefix of `text` that fits `max_tokens`, and whether it was cut.
+
+    For inputs that are NOT chunked — a whole chat message — this is the
+    guard that replaces the encoder's silent truncation with a measured,
+    flagged one (invariant 6). The document corpus goes through
+    `chunk_document`; this is for the single-vector-per-item paths.
+
+    Tokenizer-agnostic on purpose: it estimates a character budget from the
+    measured token density, then shrinks until the prefix verifiably fits,
+    rather than trusting a chars-per-token ratio that varies by script and by
+    model. Same shape as chunking._hard_split, kept here because the token
+    budget is a property of the embedding model this module owns.
+    """
+    if max_tokens <= 0:
+        raise ValueError(f"max_tokens must be positive, got {max_tokens}")
+    if not text:
+        return text, False
+
+    total = count_tokens(text)
+    if total <= max_tokens:
+        return text, False
+
+    chars = max(1, int(len(text) * max_tokens / max(1, total)))
+    while chars > 1 and count_tokens(text[:chars]) > max_tokens:
+        chars = max(1, int(chars * 0.8))
+    return text[:chars], True
+
+
 # ── Embedding Client Factory ────────────────────────────────
 
 

@@ -23,7 +23,6 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import REGCONFIG
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.chat_session import ChatSession
 from app.models.document import Chunk
 from app.models.message import Message
 from app.services.retrieval.contracts import RetrievedChunk
@@ -284,12 +283,11 @@ async def search_messages(
     corpus arm during fusion: past conversation says what this user cares about,
     not what is true.
 
-    NOTE: the tenant filter here goes through a join to chat_sessions, because
-    messages carry no denormalized user_id. That is the same HNSW pre-filter
-    weakness documented on Chunk.user_id and it applies to this query — recall
-    can degrade as the message table grows. Fixing it means a migration on
-    `messages`; it is deliberately out of Phase 2's scope and this arm is a
-    supplementary signal, so degraded recall here is not a correctness problem.
+    The tenant filter runs on messages.user_id directly (Phase 9). It used to
+    join to chat_sessions, which carried the same HNSW pre-filter weakness
+    documented on Chunk.user_id — recall degrading as the table grew. The
+    denormalized column closed that; this arm now filters on the same row the
+    index walks, exactly as the corpus arm does.
     """
     _require_user_id(user_id, "search_messages")
     await _set_ef_search(db)
@@ -297,8 +295,7 @@ async def search_messages(
     distance = Message.embedding.cosine_distance(query_embedding)
     stmt = (
         select(Message, distance.label("distance"))
-        .join(Message.session)
-        .where(ChatSession.user_id == user_id, Message.embedding.is_not(None))
+        .where(Message.user_id == user_id, Message.embedding.is_not(None))
         .order_by(distance)
         .limit(limit)
     )

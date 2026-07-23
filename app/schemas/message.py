@@ -17,10 +17,16 @@ class MessageCreate(BaseModel):
 
 
 class MessageCreateInternal(MessageCreate):
-    """Internal schema — includes session_id for FastCRUD create()."""
+    """Internal schema — includes server-resolved fields for FastCRUD create().
+
+    `user_id` is the session owner, resolved server-side (Phase 9) — never part
+    of the API-facing `MessageCreate`, so a client cannot set it.
+    """
 
     session_id: uuid.UUID
+    user_id: uuid.UUID
     embedding: list[float] | None = None
+    embedding_truncated: bool = False
 
 
 class MessageRead(BaseModel):
