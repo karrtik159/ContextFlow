@@ -30,7 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.document import Chunk, Document
-from app.services.chunking import chunk_document
+from app.services.chunkers import resolve_chunker
+from app.services.chunking import CHUNKER_VERSION, chunk_document
 from app.services.embeddings import count_tokens, embed_texts_async
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,10 @@ async def ingest_document(
             hard_split_chunks=0,
         )
 
-    drafts = chunk_document(
+    # `default=chunk_document` hands the registry THIS module's binding, which
+    # is the established patch seam — the registry must not silently bypass it.
+    chunker = resolve_chunker(content_type, default=chunk_document)
+    drafts = chunker(
         text,
         count_tokens=count_tokens,
         target_tokens=settings.CHUNK_TARGET_TOKENS,
@@ -159,6 +163,8 @@ async def ingest_document(
                 char_start=draft.char_start,
                 char_end=draft.char_end,
                 token_count=draft.token_count,
+                chunker_version=CHUNKER_VERSION,
+                was_hard_split=draft.was_hard_split,
                 embedding=vector,
             )
             for index, (draft, vector) in enumerate(zip(drafts, vectors))

@@ -50,6 +50,13 @@ _BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
 _HEADING_SEPARATOR = " > "
 _PREFIX_SEPARATOR = "\n\n"
 
+# Version of THIS algorithm. Bump on any change that alters what chunks a
+# given document produces — split rules, packing, overlap, prefix format.
+# Persisted on every chunk row (invariant 11) so a corpus containing rows of
+# mixed geometry is detectable by query, and scripts/rechunk_corpus.py knows
+# exactly which documents need re-processing.
+CHUNKER_VERSION = 1
+
 
 @dataclass(frozen=True)
 class ChunkDraft:

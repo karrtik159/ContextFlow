@@ -27,11 +27,17 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.services.retrieval.arms import ARM_REGISTRY, ArmContext, source_weights
 from app.services.retrieval.contracts import RetrievalTrace, RetrievedChunk, StageRecord
 from app.services.retrieval.fusion import assign_citation_labels, reciprocal_rank_fusion
 from app.services.retrieval.rerank import rerank_fused
 from app.services.retrieval.rewrite import rewrite_query
-from app.services.retrieval.sources import (
+
+# These imports are the ARM PATCH SEAM, not dead weight: the registry resolves
+# each ArmSpec.fn_name against THIS module's namespace at call time, so tests
+# stub arms by setting attributes here (see arms.py). Removing an import
+# silently removes an arm.
+from app.services.retrieval.sources import (  # noqa: F401
     search_chunks,
     search_chunks_sparse,
     search_graph,
@@ -42,15 +48,9 @@ from app.services.retrieval.sufficiency import assess_sufficiency
 
 logger = logging.getLogger(__name__)
 
-# The corpus is the authority; conversation history and memory personalise but
-# should not outvote it. Graph sits between: structural, but sparse and noisy.
-SOURCE_WEIGHTS = {
-    "vector": 1.0,
-    "bm25": 1.0,
-    "graph": 0.6,
-    "memory": 0.5,
-    "messages": 0.4,
-}
+# Derived from the registry — a spec cannot exist without a weight, and the
+# rationale for each value lives on ARM_REGISTRY itself.
+SOURCE_WEIGHTS = source_weights()
 
 
 class _Timer:
@@ -249,51 +249,38 @@ async def run_retrieval(
     # ── Fan out ─────────────────────────────────────────────
     candidates = settings.RETRIEVAL_CANDIDATES_PER_SOURCE
     with _Timer() as fanout_timer:
+        ctx = ArmContext(
+            user_id=user_id,
+            scoped_uuid=scoped_uuid,
+            retrieval_query=retrieval_query,
+            sparse_query=rewritten.sparse_query,
+            query_embedding=query_embedding,
+        )
+
         # PostgreSQL arms share the caller's session and therefore run in
         # sequence — see _run_db_arms_serially for why concurrency here is not
-        # merely slower but an error.
-        db_arms: list[tuple[str, Callable[[], Awaitable[list[RetrievedChunk]]]]] = [
-            (
-                "vector",
-                lambda: search_chunks(
-                    db,
-                    query_embedding=query_embedding,
-                    user_id=scoped_uuid,
-                    limit=candidates,
-                    min_similarity=settings.RETRIEVAL_MIN_SIMILARITY,
-                ),
-            ),
-            (
-                "messages",
-                lambda: search_messages(
-                    db,
-                    query_embedding=query_embedding,
-                    user_id=scoped_uuid,
-                    limit=settings.RETRIEVAL_MESSAGE_CANDIDATES,
-                    min_similarity=settings.RETRIEVAL_MIN_SIMILARITY,
-                ),
-            ),
-        ]
-
-        if settings.SPARSE_ENABLED:
-            db_arms.append(
-                (
-                    "bm25",
-                    lambda: search_chunks_sparse(
-                        db,
-                        query=rewritten.sparse_query,
-                        user_id=scoped_uuid,
-                        limit=settings.SPARSE_CANDIDATES,
-                        min_rank=settings.SPARSE_MIN_RANK,
-                        ts_config=settings.SPARSE_TS_CONFIG,
-                    ),
-                )
-            )
+        # merely slower but an error. External arms overlap freely with the
+        # whole DB group, which is where the concurrency is actually worth
+        # having, since Neo4j and Mem0 are the network-latency arms.
+        db_arms: list[tuple[str, Callable[[], Awaitable[list[RetrievedChunk]]]]] = []
+        external_arms: list[tuple[str, Callable[[], Awaitable[list[RetrievedChunk]]]]] = []
+        for spec in ARM_REGISTRY:
+            if not spec.enabled():
+                continue
+            # Resolved on THIS module at call time — the arm patch seam. See
+            # the import block above and arms.py.
+            fn = globals()[spec.fn_name]
+            factory = spec.build(ctx, fn)
+            if spec.kind == "db":
+                db_arms.append((spec.name, lambda f=factory: f(db)))
+            else:
+                external_arms.append((spec.name, lambda f=factory: f(None)))
 
         # Each extra dense probe is its own ranked list, so a chunk that all
         # three rewrites agree on gains RRF weight from that agreement. That is
         # the point of multi-query; it is also why these are flag-gated —
-        # unearned agreement is just the vector arm voting three times.
+        # unearned agreement is just the vector arm voting three times. They
+        # are query-dependent, so they cannot live in the static registry.
         for arm_name, vector in extra_embeddings:
             db_arms.append(
                 (
@@ -308,13 +295,9 @@ async def run_retrieval(
                 )
             )
 
-        # The external arms hold no PostgreSQL session, so they overlap freely
-        # with the whole DB group — which is where the concurrency was actually
-        # worth having, since Neo4j and Mem0 are the network-latency arms.
         db_results, *external_results = await asyncio.gather(
             _run_db_arms_serially(db, db_arms),
-            _run_arm("graph", lambda: search_graph(query=retrieval_query, user_id=user_id)),
-            _run_arm("memory", lambda: search_memory(query=retrieval_query, user_id=user_id)),
+            *[_run_arm(name, factory) for name, factory in external_arms],
         )
         arm_results = [*db_results, *external_results]
 

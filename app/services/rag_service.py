@@ -119,10 +119,15 @@ async def answer_knowledge_query(
             llm_calls=0,
         )
 
+    # The synthesis port dispatches on SYNTHESIS_BACKEND; its default
+    # ("crewai") lands back on this module's _synthesize, so patching
+    # rag_service._synthesize keeps intercepting the call.
+    from app.services.synthesis import synthesize
+
     context_block = build_context_block(trace.final_chunks)
     t0 = time.perf_counter()
     try:
-        answer = await _synthesize(user_id=user_id, query=original_query, context=context_block)
+        answer = await synthesize(user_id=user_id, query=original_query, context=context_block)
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         trace.record(
             StageRecord(

@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    Boolean,
     Computed,
     DateTime,
     Enum,
@@ -118,6 +119,18 @@ class Chunk(Base):
     char_start: Mapped[int] = mapped_column(Integer, nullable=False)
     char_end: Mapped[int] = mapped_column(Integer, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Which chunker algorithm produced this row (invariant 11). Server default
+    # 1 because every pre-Phase-8 row was cut by the version-1 algorithm.
+    # scripts/rechunk_corpus.py re-processes rows whose version lags
+    # chunking.CHUNKER_VERSION.
+    chunker_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    # The quality signal ingestion previously logged and discarded: True when
+    # this chunk was cut mid-sentence because its source had no structure left
+    # to exploit. Queryable so a corpus-quality audit is a SELECT, not
+    # archaeology through log files.
+    was_hard_split: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(settings.EMBEDDING_DIMENSIONS), nullable=True

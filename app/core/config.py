@@ -287,6 +287,21 @@ class RAGServiceSettings(BaseSettings):
     RAG_SERVICE_TOKEN: SecretStr = SecretStr("")
 
 
+# ── Synthesis (Phase 8) ─────────────────────────────────────
+class SynthesisSettings(BaseSettings):
+    # Which backend renders the final answer from retrieved context.
+    #   "crewai" — the SupportCrew single tool-less agent (current behavior).
+    #   "direct" — one chat-completion call through llm_provider.direct_chat.
+    # DO NOT flip to "direct" without the Phase 9 RAGAS parity measurement;
+    # the flip also changes `routed_to` deliberately (invariant 7).
+    SYNTHESIS_BACKEND: str = "crewai"
+
+    @field_validator("SYNTHESIS_BACKEND", mode="before")
+    @classmethod
+    def _normalize_backend(cls, v: str) -> str:
+        return v.lower().strip() if isinstance(v, str) else v
+
+
 # ── Semantic cache (Phase 7) ────────────────────────────────
 class SemanticCacheSettings(BaseSettings):
     # Upper bound on how long a cached answer may be served. The primary
@@ -322,6 +337,7 @@ class Settings(
     QueryRewriteSettings,
     LiveKitSettings,
     RAGServiceSettings,
+    SynthesisSettings,
     SemanticCacheSettings,
     ObservabilitySettings,
 ):
